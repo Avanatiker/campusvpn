@@ -10,6 +10,10 @@ keywords = ["eduvpn", "vpn", "wireguard", "gtk4", "tray"]
 categories = ["network-programming", "gui"]
 rust-version = "1.92"
 
+[features]
+# Fills the UI with made-up data instead of connecting, for screenshots.
+demo = []
+
 [dependencies]
 adw = { version = "0.9.2", package = "libadwaita", features = ["v1_5"] }
 anyhow = "1.0.104"

@@ -448,7 +448,13 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         None => glib::ControlFlow::Break,
     });
 
+    #[cfg(not(feature = "demo"))]
     backend::spawn(settings, ev_tx, cmd_tx, cmd_rx);
+    #[cfg(feature = "demo")]
+    {
+        let _ = (settings, cmd_tx, cmd_rx);
+        crate::demo::run(ev_tx);
+    }
     ui
 }
 

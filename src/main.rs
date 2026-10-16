@@ -1,5 +1,10 @@
+// The demo build skips the backend, which leaves parts of it unused.
+#![cfg_attr(feature = "demo", allow(dead_code, unused_imports))]
+
 mod backend;
 mod common;
+#[cfg(feature = "demo")]
+mod demo;
 mod keyring;
 mod nm;
 mod settings;

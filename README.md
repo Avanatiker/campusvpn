@@ -3,6 +3,8 @@
 An unofficial, lightweight [eduVPN](https://www.eduvpn.org/) client for Linux, written in
 Rust with GTK 4 and libadwaita.
 
+<p align="center"><img src="docs/screenshot.png" alt="eduvpn-rs main window" width="420"></p>
+
 > **Not affiliated with eduVPN, GÉANT or SURF.** eduVPN is a service of GÉANT and its
 > partners; this is an independent client. For the official app see
 > [codeberg.org/eduVPN/linux-app](https://codeberg.org/eduVPN/linux-app).
@@ -24,11 +26,16 @@ runtime, as the official client does. The VPN itself is set up through NetworkMa
 
 ### Arch Linux (AUR)
 
+**Pending:** the AUR package is not published yet, because AUR account registration is
+currently closed. Once it is available:
+
 ```sh
-paru -S eduvpn-rs      # or yay, or makepkg from https://aur.archlinux.org/packages/eduvpn-rs
+yay -S eduvpn-rs
 ```
 
-The package builds eduvpn-common itself; no Python is needed.
+Until then, build the package from [`pkg/aur/PKGBUILD`](pkg/aur/PKGBUILD) with `makepkg -si`
+(after a release is tagged), or install from source as below. The package builds
+eduvpn-common itself; no Python is needed.
 
 ### From source
 
@@ -76,6 +83,7 @@ RUST_LOG=debug eduvpn-rs
 cargo test                 # unit tests
 cargo test -- --ignored    # adds (never activates) dummy WireGuard/OpenVPN connections
                            # in NetworkManager and removes them again
+cargo run --features demo  # UI with made-up data, for screenshots
 ```
 
 ## License
