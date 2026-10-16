@@ -14,7 +14,7 @@ optdepends=('networkmanager-openvpn: connect to OpenVPN servers'
             'gnome-shell-extension-appindicator: tray icon on GNOME')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "https://codeberg.org/eduVPN/eduvpn-common/releases/download/$_commonver/eduvpn-common-$_commonver.tar.xz"{,.asc})
-sha256sums=('SKIP'
+sha256sums=('7f1381bac29a939345f765a0a5329ac29935fa3a3b63f489f15d50ef66ab22ee'
             '983d0b5a16150b334c14f5d078e815e60a3ead1261e16d28e3c0056892a509c5'
             'SKIP')
 validpgpkeys=('227FF3F8F829D9A9314D9EBA02BB8048BBFF222C') # eduvpn-common release key
