@@ -343,6 +343,10 @@ impl Backend {
     }
 
     fn remove_server(&mut self, kind: ServerType, id: &str) {
+        let exists = common::server_list().is_ok_and(|l| l.iter().any(|s| s.kind == kind && s.id == id));
+        if !exists {
+            return self.refresh_servers();
+        }
         let is_current = self.status.server.as_ref().is_some_and(|s| s.kind == kind && s.id == id);
         if is_current && matches!(self.status.phase, Phase::Connected | Phase::Connecting) {
             self.disconnect();
@@ -414,7 +418,8 @@ impl Backend {
                 s.save();
             }
             Err(e) => {
-                self.teardown(false);
+                self.teardown();
+                self.set_phase(Phase::Disconnected);
                 if startup {
                     log::warn!("auto-connect failed: {e:#}");
                     self.emit(Ev::Info(format!("Auto-connect failed: {e:#}")));
@@ -443,7 +448,7 @@ impl Backend {
         if cfg.should_failover && !used_tcp && self.failover_dropped() {
             log::info!("connection does not pass traffic, reconnecting over TCP");
             self.emit(Ev::Info("UDP seems blocked, switching to TCP".into()));
-            self.teardown(true);
+            self.teardown();
             self.set_phase(Phase::Connecting);
             let cfg = common::get_config(kind, id, true, startup)?;
             self.bring_up(&cfg)?;
@@ -550,14 +555,11 @@ impl Backend {
     }
 
     /// Takes the VPN down and tells the server.
-    fn teardown(&mut self, keep_phase: bool) {
+    fn teardown(&mut self) {
         {
             let mut sh = self.shared.lock().unwrap();
             sh.active = None;
             sh.proxy_handle = None;
-        }
-        if !keep_phase {
-            self.status.phase = Phase::Disconnecting;
         }
         if common::in_state(State::Connected) || common::in_state(State::Connecting) {
             common::ensure_state(State::Disconnecting);
@@ -589,7 +591,7 @@ impl Backend {
             return;
         }
         self.set_phase(Phase::Disconnecting);
-        self.teardown(true);
+        self.teardown();
         self.set_phase(Phase::Disconnected);
     }
 
@@ -598,7 +600,7 @@ impl Backend {
             return;
         }
         log::info!("VPN connection went down");
-        self.teardown(true);
+        self.teardown();
         self.set_phase(Phase::Disconnected);
         self.emit(Ev::Info("The VPN connection was closed".into()));
     }

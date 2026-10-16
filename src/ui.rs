@@ -650,9 +650,18 @@ impl Ui {
         d.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
         d.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         d.set_close_response("cancel");
-        let cmd = self.cmd.clone();
+        let weak = Rc::downgrade(self);
         d.connect_response(Some("remove"), move |_, _| {
-            let _ = cmd.send(Cmd::RemoveServer { kind, id: id.clone() });
+            let Some(ui) = weak.upgrade() else { return };
+            // Don't make the user wait for a connection attempt to this server to finish.
+            let st = ui.status.borrow().clone();
+            if st.phase == Phase::Connecting && st.server.as_ref().is_some_and(|s| s.kind == kind && s.id == id) {
+                backend::cancel();
+            }
+            ui.servers.borrow_mut().retain(|s| !(s.kind == kind && s.id == id));
+            ui.render_servers();
+            ui.render_status();
+            ui.send(Cmd::RemoveServer { kind, id: id.clone() });
         });
         d.present(Some(&self.window));
     }
