@@ -24,6 +24,18 @@ runtime, as the official client does. The VPN itself is set up through NetworkMa
 
 ## Install
 
+### Quick install (any distro, x86_64)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Avanatiker/eduvpn-rs/master/install.sh | sh
+```
+
+Installs the latest [release](https://github.com/Avanatiker/eduvpn-rs/releases) into
+`~/.local` (no root needed). The release includes the eduvpn-common library. You need
+NetworkManager, GTK 4.14+ and libadwaita 1.5+ (Arch, Fedora 40+, Debian 13, Ubuntu 24.04 or
+newer), plus `networkmanager-openvpn` for OpenVPN servers. Run the same command to update;
+uninstall with `curl -fsSL https://raw.githubusercontent.com/Avanatiker/eduvpn-rs/master/install.sh | sh -s -- --uninstall`.
+
 ### Arch Linux (AUR)
 
 **Pending:** the AUR package is not published yet, because AUR account registration is

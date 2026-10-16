@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  COMMON_VERSION: "5.0.3"
+  COMMON_SHA256: "983d0b5a16150b334c14f5d078e815e60a3ead1261e16d28e3c0056892a509c5"
+
+jobs:
+  release:
+    # Oldest supported base: the binary needs glibc 2.39, GTK 4.14 and libadwaita 1.5.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK 4 and libadwaita
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build eduvpn-common
+        run: |
+          curl -fsSLO "https://codeberg.org/eduVPN/eduvpn-common/releases/download/$COMMON_VERSION/eduvpn-common-$COMMON_VERSION.tar.xz"
+          echo "$COMMON_SHA256  eduvpn-common-$COMMON_VERSION.tar.xz" | sha256sum -c
+          tar xf "eduvpn-common-$COMMON_VERSION.tar.xz"
+          GOFLAGS="-trimpath -tags=release" make -C "eduvpn-common-$COMMON_VERSION"
+
+      - name: Build eduvpn-rs
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          name="eduvpn-rs-${GITHUB_REF_NAME#v}-x86_64-linux"
+          mkdir "$name"
+          cp target/release/eduvpn-rs "$name/"
+          cp "eduvpn-common-$COMMON_VERSION/lib/libeduvpn_common-$COMMON_VERSION.so" "$name/"
+          cp "eduvpn-common-$COMMON_VERSION/LICENSE" "$name/LICENSE-eduvpn-common"
+          cp data/io.github.avanatiker.eduvpn-rs.desktop data/icons/io.github.avanatiker.eduvpn-rs.svg LICENSE README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" eduvpn-rs-*.tar.gz eduvpn-rs-*.tar.gz.sha256 --generate-notes
