@@ -67,11 +67,18 @@ pub struct WgSetup {
 
 impl Nm {
     pub fn new() -> Result<Self> {
-        Ok(Self { conn: Connection::system().context("connecting to the system D-Bus")? })
+        Ok(Self {
+            conn: Connection::system().context("connecting to the system D-Bus")?,
+        })
     }
 
     fn proxy(&self, path: &str, iface: &str) -> Result<Proxy<'static>> {
-        Ok(Proxy::new(&self.conn, NM, path.to_owned(), iface.to_owned())?)
+        Ok(Proxy::new(
+            &self.conn,
+            NM,
+            path.to_owned(),
+            iface.to_owned(),
+        )?)
     }
 
     fn prop<T: TryFrom<OwnedValue>>(&self, path: &str, iface: &str, name: &str) -> Result<T>
@@ -79,6 +86,15 @@ impl Nm {
         T::Error: Into<zbus::Error>,
     {
         Ok(self.proxy(path, iface)?.get_property::<T>(name)?)
+    }
+
+    /// Uuid of the connection NetworkManager uses for the default route (e.g. the current Wi-Fi).
+    pub fn primary_connection_uuid(&self) -> Option<String> {
+        let path: OwnedObjectPath = self.prop(NM_PATH, NM, "PrimaryConnection").ok()?;
+        if path.as_str() == "/" {
+            return None;
+        }
+        self.active_uuid(path.as_str())
     }
 
     /// Global NetworkManager state (NMState). 70 = connected with internet.
@@ -94,13 +110,15 @@ impl Nm {
     }
 
     pub fn active_connections(&self) -> Vec<OwnedObjectPath> {
-        self.prop(NM_PATH, NM, "ActiveConnections").unwrap_or_default()
+        self.prop(NM_PATH, NM, "ActiveConnections")
+            .unwrap_or_default()
     }
 
     /// Finds the active connection of the given connection uuid.
     pub fn active_by_uuid(&self, uuid: &str) -> Option<OwnedObjectPath> {
         self.active_connections().into_iter().find(|p| {
-            self.prop::<String>(p.as_str(), ACTIVE_IFACE, "Uuid").is_ok_and(|u| u == uuid)
+            self.prop::<String>(p.as_str(), ACTIVE_IFACE, "Uuid")
+                .is_ok_and(|u| u == uuid)
         })
     }
 
@@ -109,23 +127,62 @@ impl Nm {
     }
 
     pub fn active_state(&self, active: &str) -> ActiveState {
-        self.prop::<u32>(active, ACTIVE_IFACE, "State").map(ActiveState::from).unwrap_or(ActiveState::Unknown)
+        self.prop::<u32>(active, ACTIVE_IFACE, "State")
+            .map(ActiveState::from)
+            .unwrap_or(ActiveState::Unknown)
+    }
+
+    /// True if this is a WireGuard connection pointing at a local ProxyGuard.
+    pub fn uses_local_endpoint(&self, uuid: &str) -> bool {
+        self.wireguard_endpoints(uuid)
+            .is_some_and(|eps| eps.iter().any(|e| e.starts_with("127.0.0.1:")))
+    }
+
+    fn wireguard_endpoints(&self, uuid: &str) -> Option<Vec<String>> {
+        let path = self.connection_path(uuid)?;
+        let settings: HashMap<String, HashMap<String, OwnedValue>> = self
+            .proxy(
+                path.as_str(),
+                "org.freedesktop.NetworkManager.Settings.Connection",
+            )
+            .ok()?
+            .call("GetSettings", &())
+            .ok()?;
+        let peers: Vec<HashMap<String, OwnedValue>> = settings
+            .get("wireguard")?
+            .get("peers")?
+            .try_clone()
+            .ok()?
+            .try_into()
+            .ok()?;
+        Some(
+            peers
+                .iter()
+                .filter_map(|p| String::try_from(p.get("endpoint")?.try_clone().ok()?).ok())
+                .collect(),
+        )
     }
 
     pub fn delete_connection(&self, uuid: &str) -> Result<()> {
         if let Some(path) = self.connection_path(uuid) {
-            self.proxy(path.as_str(), "org.freedesktop.NetworkManager.Settings.Connection")?
-                .call_method("Delete", &())?;
+            self.proxy(
+                path.as_str(),
+                "org.freedesktop.NetworkManager.Settings.Connection",
+            )?
+            .call_method("Delete", &())?;
         }
         Ok(())
     }
 
     /// Activates a connection and waits until it is up.
     pub fn activate(&self, uuid: &str, cancel: &AtomicBool) -> Result<OwnedObjectPath> {
-        let path = self.connection_path(uuid).context("VPN connection not found in NetworkManager")?;
+        let path = self
+            .connection_path(uuid)
+            .context("VPN connection not found in NetworkManager")?;
         let root = OwnedObjectPath::try_from("/").unwrap();
-        let active: OwnedObjectPath =
-            self.proxy(NM_PATH, NM)?.call("ActivateConnection", &(&path, &root, &root))?;
+        let active: OwnedObjectPath = self
+            .proxy(NM_PATH, NM)?
+            .call("ActivateConnection", &(&path, &root, &root))?;
         let deadline = Instant::now() + Duration::from_secs(90);
         loop {
             if cancel.load(Ordering::SeqCst) {
@@ -153,7 +210,8 @@ impl Nm {
 
     pub fn deactivate(&self, active: &str) -> Result<()> {
         let path = OwnedObjectPath::try_from(active)?;
-        self.proxy(NM_PATH, NM)?.call_method("DeactivateConnection", &(&path,))?;
+        self.proxy(NM_PATH, NM)?
+            .call_method("DeactivateConnection", &(&path,))?;
         Ok(())
     }
 
@@ -187,7 +245,9 @@ impl Nm {
         proxy: Option<&ProxyRouting>,
     ) -> Result<WgSetup> {
         let ini = parse_ini(config);
-        let iface = ini.get("Interface").context("WireGuard config has no [Interface]")?;
+        let iface = ini
+            .get("Interface")
+            .context("WireGuard config has no [Interface]")?;
         let peer = ini.get("Peer").context("WireGuard config has no [Peer]")?;
 
         let fwmark: u32 = env_num("EDUVPN_WG_FWMARK").unwrap_or(DEFAULT_FWMARK);
@@ -200,11 +260,18 @@ impl Nm {
         }
 
         let lan4: Vec<IpNet> = if allow_lan {
-            ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"].iter().map(|s| s.parse().unwrap()).collect()
+            ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+                .iter()
+                .map(|s| s.parse().unwrap())
+                .collect()
         } else {
             vec![]
         };
-        let lan6: Vec<IpNet> = if allow_lan { vec!["fc00::/7".parse().unwrap()] } else { vec![] };
+        let lan6: Vec<IpNet> = if allow_lan {
+            vec!["fc00::/7".parse().unwrap()]
+        } else {
+            vec![]
+        };
 
         let mut addrs4 = Vec::new();
         let mut addrs6 = Vec::new();
@@ -214,7 +281,11 @@ impl Nm {
         let mut first6 = None;
         for a in split_list(iface.get("Address").map(String::as_str).unwrap_or("")) {
             let net: IpNet = a.parse().with_context(|| format!("invalid address {a}"))?;
-            let first = if net.addr().is_ipv4() { &mut first4 } else { &mut first6 };
+            let first = if net.addr().is_ipv4() {
+                &mut first4
+            } else {
+                &mut first6
+            };
             first.get_or_insert_with(|| net.to_string());
             let (addrs, lans, excl) = match net {
                 IpNet::V4(_) => (&mut addrs4, &lan4, &mut exclude4),
@@ -246,7 +317,10 @@ impl Nm {
             (false, false) => [1, 0, 0, 0],
         };
 
-        let build_ip = |v6: bool, addrs: Vec<HashMap<&'static str, Value<'static>>>, excl: &[IpNet], lans: &[IpNet]| {
+        let build_ip = |v6: bool,
+                        addrs: Vec<HashMap<&'static str, Value<'static>>>,
+                        excl: &[IpNet],
+                        lans: &[IpNet]| {
             let family: i32 = if v6 { 10 } else { 2 };
             let host_len: u8 = if v6 { 128 } else { 32 };
             let mut rules: Vec<HashMap<&'static str, Value<'static>>> = Vec::new();
@@ -260,7 +334,9 @@ impl Nm {
             ]));
             if let Some(p) = proxy {
                 for ip in &p.peer_ips {
-                    let Ok(addr) = ip.parse::<IpAddr>() else { continue };
+                    let Ok(addr) = ip.parse::<IpAddr>() else {
+                        continue;
+                    };
                     if addr.is_ipv6() != v6 {
                         continue;
                     }
@@ -328,21 +404,32 @@ impl Nm {
         let mut wg_peer: HashMap<&'static str, Value<'static>> = HashMap::new();
         let endpoint = match proxy {
             Some(p) => format!("127.0.0.1:{}", p.listen_port),
-            None => peer.get("Endpoint").cloned().context("WireGuard config has no Endpoint")?,
+            None => peer
+                .get("Endpoint")
+                .cloned()
+                .context("WireGuard config has no Endpoint")?,
         };
         wg_peer.insert("endpoint", Value::from(endpoint));
         wg_peer.insert(
             "public-key",
-            Value::from(peer.get("PublicKey").cloned().context("WireGuard config has no PublicKey")?),
+            Value::from(
+                peer.get("PublicKey")
+                    .cloned()
+                    .context("WireGuard config has no PublicKey")?,
+            ),
         );
         let allowed: Vec<String> =
-            split_list(peer.get("AllowedIPs").map(String::as_str).unwrap_or("")).map(str::to_owned).collect();
+            split_list(peer.get("AllowedIPs").map(String::as_str).unwrap_or(""))
+                .map(str::to_owned)
+                .collect();
         wg_peer.insert("allowed-ips", Value::from(allowed));
         if let Some(psk) = peer.get("PresharedKey") {
             wg_peer.insert("preshared-key", Value::from(psk.clone()));
             wg_peer.insert("preshared-key-flags", Value::from(0u32));
         }
-        if let Some(ka) = peer.get("PersistentKeepalive").and_then(|k| k.parse::<u32>().ok())
+        if let Some(ka) = peer
+            .get("PersistentKeepalive")
+            .and_then(|k| k.parse::<u32>().ok())
             && ka > 0
         {
             wg_peer.insert("persistent-keepalive", Value::from(ka));
@@ -353,7 +440,12 @@ impl Nm {
         let mut wireguard: Section = HashMap::from([
             (
                 "private-key",
-                Value::from(iface.get("PrivateKey").cloned().context("WireGuard config has no PrivateKey")?),
+                Value::from(
+                    iface
+                        .get("PrivateKey")
+                        .cloned()
+                        .context("WireGuard config has no PrivateKey")?,
+                ),
             ),
             ("fwmark", Value::from(fwmark)),
             ("listen-port", Value::from(u32::from(listen_port))),
@@ -366,7 +458,10 @@ impl Nm {
         }
 
         let mut settings: ConnSettings = HashMap::new();
-        settings.insert("connection", connection_section(uuid, "wireguard", Some(IFACE_NAME)));
+        settings.insert(
+            "connection",
+            connection_section(uuid, "wireguard", Some(IFACE_NAME)),
+        );
         settings.insert("wireguard", wireguard);
         if !addrs4.is_empty() {
             settings.insert("ipv4", build_ip(false, addrs4, &exclude4, &lan4));
@@ -377,17 +472,35 @@ impl Nm {
             settings.insert("ipv6", HashMap::from([("method", Value::from("disabled"))]));
         }
         self.add_unsaved(settings)?;
-        Ok(WgSetup { gateway_subnet, listen_port })
+        Ok(WgSetup {
+            gateway_subnet,
+            listen_port,
+        })
     }
 
     /// Creates an OpenVPN connection using the NetworkManager-openvpn importer. Returns the new uuid.
-    pub fn add_openvpn(&self, config: &str, default_gateway: bool, dns_search: &[String]) -> Result<String> {
+    pub fn add_openvpn(
+        &self,
+        config: &str,
+        default_gateway: bool,
+        dns_search: &[String],
+    ) -> Result<String> {
         let dir = std::env::temp_dir().join(format!("eduvpn-rs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir)?;
         let file = dir.join(format!("{CONNECTION_ID}.ovpn"));
         crate::keyring::write_private(&file, config)?;
         let out = std::process::Command::new("nmcli")
-            .args(["--terse", "connection", "import", "type", "openvpn", "file"])
+            // In memory only: the connection holds the client key and must not persist
+            // world-readable settings or survive a reboot.
+            .args([
+                "--terse",
+                "connection",
+                "import",
+                "--temporary",
+                "type",
+                "openvpn",
+                "file",
+            ])
             .arg(&file)
             .output();
         let _ = std::fs::remove_dir_all(&dir);
@@ -415,16 +528,19 @@ impl Nm {
         let mut args: Vec<String> = vec![
             "connection".into(),
             "modify".into(),
+            "--temporary".into(),
             uuid.clone(),
             "connection.autoconnect".into(),
             "no".into(),
-            "connection.permissions".into(),
-            format!("user:{}", user_name()),
             "ipv4.never-default".into(),
             never_default.into(),
             "ipv6.never-default".into(),
             never_default.into(),
         ];
+        let user = user_name();
+        if !user.is_empty() {
+            args.extend(["connection.permissions".to_owned(), format!("user:{user}")]);
+        }
         if default_gateway {
             for p in ["ipv4.dns-priority", "ipv6.dns-priority"] {
                 args.extend([p.to_owned(), i32::MIN.to_string()]);
@@ -438,29 +554,45 @@ impl Nm {
         let out = std::process::Command::new("nmcli").args(&args).output()?;
         if !out.status.success() {
             let _ = self.delete_connection(&uuid);
-            bail!("configuring the OpenVPN connection failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "configuring the OpenVPN connection failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(uuid)
     }
 
     fn ip4_config(&self, active: &str) -> Option<OwnedObjectPath> {
-        self.prop::<OwnedObjectPath>(active, ACTIVE_IFACE, "Ip4Config").ok().filter(|p| p.as_str() != "/")
+        self.prop::<OwnedObjectPath>(active, ACTIVE_IFACE, "Ip4Config")
+            .ok()
+            .filter(|p| p.as_str() != "/")
     }
 
     fn first_address(&self, config: &str, iface: &str) -> Option<String> {
-        let data: Vec<HashMap<String, OwnedValue>> = self.prop(config, iface, "AddressData").ok()?;
+        let data: Vec<HashMap<String, OwnedValue>> =
+            self.prop(config, iface, "AddressData").ok()?;
         let addr = data.first()?.get("address")?;
         String::try_from(addr.try_clone().ok()?).ok()
     }
 
     pub fn ipv4_address(&self, active: &str) -> Option<String> {
-        self.first_address(self.ip4_config(active)?.as_str(), "org.freedesktop.NetworkManager.IP4Config")
+        self.first_address(
+            self.ip4_config(active)?.as_str(),
+            "org.freedesktop.NetworkManager.IP4Config",
+        )
     }
 
     pub fn ipv6_address(&self, active: &str) -> Option<String> {
-        let cfg = self.prop::<OwnedObjectPath>(active, ACTIVE_IFACE, "Ip6Config").ok()?;
-        let data: Vec<HashMap<String, OwnedValue>> =
-            self.prop(cfg.as_str(), "org.freedesktop.NetworkManager.IP6Config", "AddressData").ok()?;
+        let cfg = self
+            .prop::<OwnedObjectPath>(active, ACTIVE_IFACE, "Ip6Config")
+            .ok()?;
+        let data: Vec<HashMap<String, OwnedValue>> = self
+            .prop(
+                cfg.as_str(),
+                "org.freedesktop.NetworkManager.IP6Config",
+                "AddressData",
+            )
+            .ok()?;
         data.iter()
             .filter_map(|d| String::try_from(d.get("address")?.try_clone().ok()?).ok())
             .find(|a| !a.starts_with("fe80"))
@@ -468,9 +600,13 @@ impl Nm {
 
     pub fn ipv4_gateway(&self, active: &str) -> Option<String> {
         let cfg = self.ip4_config(active)?;
-        self.prop::<String>(cfg.as_str(), "org.freedesktop.NetworkManager.IP4Config", "Gateway")
-            .ok()
-            .filter(|g| !g.is_empty())
+        self.prop::<String>(
+            cfg.as_str(),
+            "org.freedesktop.NetworkManager.IP4Config",
+            "Gateway",
+        )
+        .ok()
+        .filter(|g| !g.is_empty())
     }
 
     /// The kernel interface carrying the tunnel. For OpenVPN NM reports the tun device as a
@@ -486,8 +622,14 @@ impl Nm {
                 .filter(|p| p.as_str() != active)
                 .find(|p| self.ipv4_address(p.as_str()).as_deref() == Some(ip.as_str()))?;
         }
-        let devices: Vec<OwnedObjectPath> = self.prop(target.as_str(), ACTIVE_IFACE, "Devices").ok()?;
-        self.prop(devices.first()?.as_str(), "org.freedesktop.NetworkManager.Device", "Interface").ok()
+        let devices: Vec<OwnedObjectPath> =
+            self.prop(target.as_str(), ACTIVE_IFACE, "Devices").ok()?;
+        self.prop(
+            devices.first()?.as_str(),
+            "org.freedesktop.NetworkManager.Device",
+            "Interface",
+        )
+        .ok()
     }
 
     /// Subscribes to state changes of all active connections. Calls `f(path, state)`; runs forever.
@@ -517,8 +659,12 @@ fn connection_section(uuid: &str, ty: &str, iface: Option<&str>) -> Section {
         ("uuid", Value::from(uuid.to_owned())),
         ("type", Value::from(ty.to_owned())),
         ("autoconnect", Value::from(false)),
-        ("permissions", Value::from(vec![format!("user:{}:", user_name())])),
     ]);
+    // Only this user may see and use the connection (it contains the private key).
+    let user = user_name();
+    if !user.is_empty() {
+        s.insert("permissions", Value::from(vec![format!("user:{user}:")]));
+    }
     if let Some(i) = iface {
         s.insert("interface-name", Value::from(i.to_owned()));
     }
@@ -526,7 +672,10 @@ fn connection_section(uuid: &str, ty: &str, iface: Option<&str>) -> Section {
 }
 
 fn address_data(addr: IpAddr, prefix: u8) -> HashMap<&'static str, Value<'static>> {
-    HashMap::from([("address", Value::from(addr.to_string())), ("prefix", Value::from(u32::from(prefix)))])
+    HashMap::from([
+        ("address", Value::from(addr.to_string())),
+        ("prefix", Value::from(u32::from(prefix))),
+    ])
 }
 
 fn split_list(s: &str) -> impl Iterator<Item = &str> {
@@ -547,7 +696,9 @@ fn parse_ini(s: &str) -> HashMap<String, HashMap<String, String>> {
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             section = name.trim().to_owned();
         } else if let Some((k, v)) = line.split_once('=') {
-            out.entry(section.clone()).or_default().insert(k.trim().to_owned(), v.trim().to_owned());
+            out.entry(section.clone())
+                .or_default()
+                .insert(k.trim().to_owned(), v.trim().to_owned());
         }
     }
     out
@@ -586,7 +737,9 @@ fn free_udp_port_except(exclude: u16) -> Result<u16> {
 }
 
 pub fn rx_bytes_path(iface: &str) -> PathBuf {
-    PathBuf::from("/sys/class/net").join(iface).join("statistics/rx_bytes")
+    PathBuf::from("/sys/class/net")
+        .join(iface)
+        .join("statistics/rx_bytes")
 }
 
 #[cfg(test)]
@@ -598,12 +751,39 @@ mod tests {
         [Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAllowedIPs = 0.0.0.0/0, ::/0\n\
         Endpoint = 192.0.2.1:51820\nPersistentKeepalive = 25\n";
 
+    #[test]
+    fn parses_wireguard_config() {
+        let ini = parse_ini(WG);
+        assert_eq!(ini["Interface"]["MTU"], "1392");
+        assert_eq!(ini["Peer"]["Endpoint"], "192.0.2.1:51820");
+        assert_eq!(
+            split_list(&ini["Peer"]["AllowedIPs"]).collect::<Vec<_>>(),
+            ["0.0.0.0/0", "::/0"]
+        );
+        assert_eq!(wireguard_proxy_endpoint(WG), None);
+        assert_eq!(
+            wireguard_proxy_endpoint(
+                "[Peer]\nProxyEndpoint = https://vpn.example.org/proxyguard\n"
+            )
+            .as_deref(),
+            Some("https://vpn.example.org/proxyguard")
+        );
+    }
+
     /// Needs a running NetworkManager. The connection is only added, never activated.
     #[test]
     #[ignore]
     fn add_wireguard_connection() {
         let nm = Nm::new().unwrap();
-        for proxy in [None, Some(ProxyRouting { listen_port: 40000, source_port: 40001, peer_ips: vec!["192.0.2.1".into()], peer_port: 443 })] {
+        for proxy in [
+            None,
+            Some(ProxyRouting {
+                listen_port: 40000,
+                source_port: 40001,
+                peer_ips: vec!["192.0.2.1".into()],
+                peer_port: 443,
+            }),
+        ] {
             let uuid = uuid::Uuid::new_v4().to_string();
             let res = nm.add_wireguard(&uuid, WG, true, true, proxy.as_ref());
             let path = nm.connection_path(&uuid);

@@ -16,17 +16,23 @@ use crate::types::{self, Candidate, Expiry, Protocol, Server, ServerType};
 
 #[derive(Debug)]
 pub enum Cmd {
-    Connect { kind: ServerType, id: String },
+    Connect {
+        kind: ServerType,
+        id: String,
+    },
     /// Connect to the last used server, or disconnect when connected.
     Toggle,
     Disconnect,
     AddServer(Candidate),
-    RemoveServer { kind: ServerType, id: String },
+    RemoveServer {
+        kind: ServerType,
+        id: String,
+    },
     SetProfile(String),
     SetLocation(String),
     Renew,
     /// The VPN went down without us asking (e.g. disconnected from the system network menu).
-    ExternalDown,
+    ExternalDown(String),
     Quit,
 }
 
@@ -56,8 +62,14 @@ pub enum Ev {
     Servers(Vec<Server>),
     OAuth(String),
     OAuthDone,
-    AskProfile { cookie: usize, profiles: Vec<(String, String)> },
-    AskLocation { cookie: usize, locations: Vec<String> },
+    AskProfile {
+        cookie: usize,
+        profiles: Vec<(String, String)>,
+    },
+    AskLocation {
+        cookie: usize,
+        locations: Vec<String>,
+    },
     Error(String),
     Info(String),
     QuitDone,
@@ -66,6 +78,11 @@ pub enum Ev {
 pub type EvSender = async_channel::Sender<Ev>;
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Handle of the running ProxyGuard tunnel. eduvpn-common frees the handle when the tunnel
+/// stops, and using a freed handle aborts the process, so this is cleared (under the lock)
+/// before the tunnel is stopped and checked (under the lock) before every restart.
+static PROXY: Mutex<Option<usize>> = Mutex::new(None);
 
 /// Aborts the running connect / login. Safe to call from any thread.
 pub fn cancel() {
@@ -86,21 +103,31 @@ impl common::Callbacks for GoCallbacks {
     fn on_transition(&self, old: State, new: State, data: &str) {
         match new {
             State::OAuthStarted => {
-                open_browser(data);
+                // The UI opens the browser.
                 let _ = self.ev.try_send(Ev::OAuth(data.to_owned()));
             }
-            State::AskProfile => match serde_json::from_str::<types::RequiredAsk<types::Profiles>>(data) {
-                Ok(ask) => {
-                    let _ = self.ev.try_send(Ev::AskProfile { cookie: ask.cookie, profiles: ask.data.sorted() });
+            State::AskProfile => {
+                match serde_json::from_str::<types::RequiredAsk<types::Profiles>>(data) {
+                    Ok(ask) => {
+                        let _ = self.ev.try_send(Ev::AskProfile {
+                            cookie: ask.cookie,
+                            profiles: ask.data.sorted(),
+                        });
+                    }
+                    Err(e) => log::error!("bad profile request: {e}"),
                 }
-                Err(e) => log::error!("bad profile request: {e}"),
-            },
-            State::AskLocation => match serde_json::from_str::<types::RequiredAsk<Vec<String>>>(data) {
-                Ok(ask) => {
-                    let _ = self.ev.try_send(Ev::AskLocation { cookie: ask.cookie, locations: ask.data });
+            }
+            State::AskLocation => {
+                match serde_json::from_str::<types::RequiredAsk<Vec<String>>>(data) {
+                    Ok(ask) => {
+                        let _ = self.ev.try_send(Ev::AskLocation {
+                            cookie: ask.cookie,
+                            locations: ask.data,
+                        });
+                    }
+                    Err(e) => log::error!("bad location request: {e}"),
                 }
-                Err(e) => log::error!("bad location request: {e}"),
-            },
+            }
             _ if old == State::OAuthStarted => {
                 let _ = self.ev.try_send(Ev::OAuthDone);
             }
@@ -117,15 +144,6 @@ impl common::Callbacks for GoCallbacks {
     }
 }
 
-fn open_browser(url: &str) {
-    match std::process::Command::new("xdg-open").arg(url).spawn() {
-        Ok(mut child) => {
-            std::thread::spawn(move || child.wait());
-        }
-        Err(e) => log::error!("opening browser: {e}"),
-    }
-}
-
 /// State shared with the NetworkManager watcher thread.
 #[derive(Default)]
 struct Shared {
@@ -133,7 +151,6 @@ struct Shared {
     active: Option<String>,
     /// NetworkManager uuid of our VPN connection, set before it is activated.
     uuid: Option<String>,
-    proxy_handle: Option<usize>,
 }
 
 struct Backend {
@@ -178,7 +195,10 @@ impl Backend {
         let lib = common::init(
             &dir,
             env!("CARGO_PKG_VERSION"),
-            Box::new(GoCallbacks { ev: ev.clone(), keyring: Keyring::new(dir.clone()) }),
+            Box::new(GoCallbacks {
+                ev: ev.clone(),
+                keyring: Keyring::new(dir.clone()),
+            }),
         )?;
         log::info!("loaded {}", lib.display());
 
@@ -222,7 +242,10 @@ impl Backend {
     }
 
     fn uuid(&self) -> Option<String> {
-        std::fs::read_to_string(&self.uuid_file).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+        std::fs::read_to_string(&self.uuid_file)
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
     }
 
     fn set_uuid(&self, uuid: &str) {
@@ -239,12 +262,28 @@ impl Backend {
         self.refresh_servers();
         self.status.server = common::current_server().or_else(|| {
             let last = self.last_server()?;
-            common::server_list().ok()?.into_iter().find(|s| s.kind == last.kind && s.id == last.id)
+            common::server_list()
+                .ok()?
+                .into_iter()
+                .find(|s| s.kind == last.kind && s.id == last.id)
         });
 
         // Still connected from a previous run?
         if let Some(uuid) = self.uuid() {
             match self.nm.active_by_uuid(&uuid) {
+                // WireGuard over TCP needs ProxyGuard, which died with the previous process.
+                // Such a connection carries no traffic, so replace it.
+                Some(_) if self.nm.uses_local_endpoint(&uuid) => {
+                    log::info!("previous TCP connection cannot be resumed, reconnecting");
+                    common::ensure_state(State::Connected);
+                    self.shared.lock().unwrap().uuid = Some(uuid.clone());
+                    self.teardown();
+                    if let Some(last) = self.last_server() {
+                        self.publish();
+                        self.wait_for_network();
+                        return self.connect(last.kind, &last.id, true);
+                    }
+                }
                 Some(active) if self.nm.active_state(active.as_str()) == ActiveState::Activated => {
                     log::info!("VPN already connected");
                     common::ensure_state(State::Connected);
@@ -288,7 +327,10 @@ impl Backend {
                 Phase::Connected | Phase::Connecting => self.disconnect(),
                 _ => match self.last_server() {
                     Some(last) => self.connect(last.kind, &last.id, false),
-                    None => match common::server_list().ok().and_then(|l| l.into_iter().next()) {
+                    None => match common::server_list()
+                        .ok()
+                        .and_then(|l| l.into_iter().next())
+                    {
                         Some(s) => self.connect(s.kind, &s.id, false),
                         None => self.emit(Ev::Info("Add a server first".into())),
                     },
@@ -299,14 +341,16 @@ impl Backend {
             Cmd::RemoveServer { kind, id } => self.remove_server(kind, &id),
             Cmd::SetProfile(p) => self.change_and_reconnect(|| common::set_profile(&p)),
             Cmd::SetLocation(cc) => {
-                let Some(org) = self.status.server.as_ref().map(|s| s.id.clone()) else { return };
+                let Some(org) = self.status.server.as_ref().map(|s| s.id.clone()) else {
+                    return;
+                };
                 self.change_and_reconnect(|| common::set_secure_location(&org, &cc));
             }
             Cmd::Renew => self.renew(),
-            Cmd::ExternalDown => self.external_down(),
+            Cmd::ExternalDown(path) => self.external_down(&path),
             Cmd::Quit => {
                 // A ProxyGuard (WireGuard over TCP) tunnel lives in this process and dies with it.
-                if self.shared.lock().unwrap().proxy_handle.is_some() {
+                if PROXY.lock().unwrap().is_some() {
                     self.disconnect();
                 }
                 common::deregister();
@@ -343,11 +387,16 @@ impl Backend {
     }
 
     fn remove_server(&mut self, kind: ServerType, id: &str) {
-        let exists = common::server_list().is_ok_and(|l| l.iter().any(|s| s.kind == kind && s.id == id));
+        let exists =
+            common::server_list().is_ok_and(|l| l.iter().any(|s| s.kind == kind && s.id == id));
         if !exists {
             return self.refresh_servers();
         }
-        let is_current = self.status.server.as_ref().is_some_and(|s| s.kind == kind && s.id == id);
+        let is_current = self
+            .status
+            .server
+            .as_ref()
+            .is_some_and(|s| s.kind == kind && s.id == id);
         if is_current && matches!(self.status.phase, Phase::Connected | Phase::Connecting) {
             self.disconnect();
         }
@@ -358,7 +407,10 @@ impl Backend {
         self.keyring.clear(id, kind);
         {
             let mut s = self.settings.lock().unwrap();
-            if s.last_server.as_ref().is_some_and(|l| l.kind == kind && l.id == id) {
+            if s.last_server
+                .as_ref()
+                .is_some_and(|l| l.kind == kind && l.id == id)
+            {
                 s.last_server = None;
                 s.save();
             }
@@ -386,7 +438,9 @@ impl Backend {
     }
 
     fn renew(&mut self) {
-        let Some(server) = self.status.server.clone() else { return };
+        let Some(server) = self.status.server.clone() else {
+            return;
+        };
         if matches!(self.status.phase, Phase::Connected | Phase::Connecting) {
             self.disconnect();
         }
@@ -403,18 +457,37 @@ impl Backend {
             self.disconnect();
         }
         CANCEL.store(false, Ordering::SeqCst);
-        if let Some(s) = common::server_list().ok().and_then(|l| l.into_iter().find(|s| s.kind == kind && s.id == id)) {
+        if let Some(s) = common::server_list()
+            .ok()
+            .and_then(|l| l.into_iter().find(|s| s.kind == kind && s.id == id))
+        {
             self.status.server = Some(s);
         }
         self.set_phase(Phase::Connecting);
 
-        let prefer_tcp = self.settings.lock().unwrap().prefer_tcp || std::env::var("EDUVPN_PREFER_TCP").is_ok_and(|v| v == "1");
-        let res = self.try_connect(kind, id, prefer_tcp, startup);
+        // UDP being blocked is a property of the network, so remember it per server and network.
+        let udp_key = self
+            .nm
+            .primary_connection_uuid()
+            .map(|net| format!("{id}|{net}"));
+        let prefer_tcp = {
+            let s = self.settings.lock().unwrap();
+            s.prefer_tcp
+                || udp_key.as_ref().is_some_and(|k| s.is_udp_blocked(k))
+                || std::env::var("EDUVPN_PREFER_TCP").is_ok_and(|v| v == "1")
+        };
+        if prefer_tcp {
+            log::info!("using TCP for this server and network");
+        }
+        let res = self.try_connect(kind, id, prefer_tcp, startup, udp_key);
         self.emit(Ev::OAuthDone);
         match res {
             Ok(()) => {
                 let mut s = self.settings.lock().unwrap();
-                s.last_server = Some(LastServer { kind, id: id.to_owned() });
+                s.last_server = Some(LastServer {
+                    kind,
+                    id: id.to_owned(),
+                });
                 s.save();
             }
             Err(e) => {
@@ -431,9 +504,19 @@ impl Backend {
         self.refresh_servers();
     }
 
-    fn try_connect(&mut self, kind: ServerType, id: &str, prefer_tcp: bool, startup: bool) -> Result<()> {
+    fn try_connect(
+        &mut self,
+        kind: ServerType,
+        id: &str,
+        prefer_tcp: bool,
+        startup: bool,
+        udp_key: Option<String>,
+    ) -> Result<()> {
         // GetConfig may only start from these states.
-        if !(common::in_state(State::Main) || common::in_state(State::Disconnected) || common::in_state(State::GotConfig)) {
+        if !(common::in_state(State::Main)
+            || common::in_state(State::Disconnected)
+            || common::in_state(State::GotConfig))
+        {
             common::ensure_state(State::Main);
         }
         let cfg = common::get_config(kind, id, prefer_tcp, startup)?;
@@ -447,7 +530,14 @@ impl Backend {
         let used_tcp = prefer_tcp || cfg.protocol == Protocol::WireGuardTcp;
         if cfg.should_failover && !used_tcp && self.failover_dropped() {
             log::info!("connection does not pass traffic, reconnecting over TCP");
-            self.emit(Ev::Info("UDP seems blocked, switching to TCP".into()));
+            self.emit(Ev::Info(
+                "UDP seems blocked on this network, switching to TCP".into(),
+            ));
+            if let Some(key) = udp_key {
+                let mut s = self.settings.lock().unwrap();
+                s.mark_udp_blocked(key);
+                s.save();
+            }
             self.teardown();
             self.set_phase(Phase::Connecting);
             let cfg = common::get_config(kind, id, true, startup)?;
@@ -465,13 +555,17 @@ impl Backend {
         let allow_lan = self.settings.lock().unwrap().allow_lan;
 
         let uuid = match cfg.protocol {
-            Protocol::OpenVpn => self.nm.add_openvpn(&cfg.config, cfg.default_gateway, &cfg.dns_search_domains)?,
+            Protocol::OpenVpn => {
+                self.nm
+                    .add_openvpn(&cfg.config, cfg.default_gateway, &cfg.dns_search_domains)?
+            }
             Protocol::WireGuard | Protocol::WireGuardTcp => {
                 let uuid = uuid::Uuid::new_v4().to_string();
                 let mut proxy = None;
                 let mut routing = None;
                 if cfg.protocol == Protocol::WireGuardTcp {
-                    let endpoint = nm::wireguard_proxy_endpoint(&cfg.config).context("config has no ProxyEndpoint")?;
+                    let endpoint = nm::wireguard_proxy_endpoint(&cfg.config)
+                        .context("config has no ProxyEndpoint")?;
                     let listen_port = nm::free_udp_port()?;
                     let source_port = nm::free_tcp_port()?;
                     let pg = common::ProxyGuard::new(listen_port, source_port, &endpoint)?;
@@ -479,18 +573,33 @@ impl Backend {
                         listen_port,
                         source_port,
                         peer_ips: pg.peer_ips()?,
-                        peer_port: if endpoint.starts_with("http://") { 80 } else { 443 },
+                        peer_port: if endpoint.starts_with("http://") {
+                            80
+                        } else {
+                            443
+                        },
                     });
                     proxy = Some(pg);
                 }
-                let setup = self.nm.add_wireguard(&uuid, &cfg.config, cfg.default_gateway, allow_lan, routing.as_ref())?;
+                let setup = self.nm.add_wireguard(
+                    &uuid,
+                    &cfg.config,
+                    cfg.default_gateway,
+                    allow_lan,
+                    routing.as_ref(),
+                )?;
                 self.wg_subnet = setup.gateway_subnet;
                 if let Some(pg) = proxy {
-                    self.shared.lock().unwrap().proxy_handle = Some(pg.handle());
+                    let handle = pg.handle();
+                    *PROXY.lock().unwrap() = Some(handle);
                     let port = setup.listen_port;
                     std::thread::spawn(move || {
                         if let Err(e) = pg.tunnel(port) {
                             log::info!("ProxyGuard tunnel ended: {e:#}");
+                        }
+                        let mut p = PROXY.lock().unwrap();
+                        if *p == Some(handle) {
+                            *p = None;
                         }
                     });
                 }
@@ -525,14 +634,18 @@ impl Backend {
 
     /// Runs eduvpn-common's reachability test. Returns true if the tunnel passes no traffic.
     fn failover_dropped(&self) -> bool {
-        let Some(active) = self.shared.lock().unwrap().active.clone() else { return false };
+        let Some(active) = self.shared.lock().unwrap().active.clone() else {
+            return false;
+        };
         let Some(iface) = self.nm.tunnel_interface(&active) else {
             log::warn!("failover: tunnel interface not found");
             return false;
         };
         let wireguard = iface == nm::IFACE_NAME;
         let gateway = if wireguard {
-            self.wg_subnet.as_deref().and_then(|s| common::calculate_gateway(s).ok())
+            self.wg_subnet
+                .as_deref()
+                .and_then(|s| common::calculate_gateway(s).ok())
         } else {
             self.nm.ipv4_gateway(&active)
         };
@@ -557,9 +670,8 @@ impl Backend {
     /// Takes the VPN down and tells the server.
     fn teardown(&mut self) {
         {
-            let mut sh = self.shared.lock().unwrap();
-            sh.active = None;
-            sh.proxy_handle = None;
+            self.shared.lock().unwrap().active = None;
+            *PROXY.lock().unwrap() = None;
         }
         if common::in_state(State::Connected) || common::in_state(State::Connecting) {
             common::ensure_state(State::Disconnecting);
@@ -587,7 +699,12 @@ impl Backend {
     }
 
     fn disconnect(&mut self) {
-        if self.status.phase == Phase::Disconnected && self.uuid().and_then(|u| self.nm.active_by_uuid(&u)).is_none() {
+        if self.status.phase == Phase::Disconnected
+            && self
+                .uuid()
+                .and_then(|u| self.nm.active_by_uuid(&u))
+                .is_none()
+        {
             return;
         }
         self.set_phase(Phase::Disconnecting);
@@ -595,8 +712,10 @@ impl Backend {
         self.set_phase(Phase::Disconnected);
     }
 
-    fn external_down(&mut self) {
-        if self.status.phase != Phase::Connected {
+    fn external_down(&mut self, path: &str) {
+        // The event may be stale: we might have reconnected since it was sent.
+        let ours = self.shared.lock().unwrap().active.as_deref() == Some(path);
+        if !ours || self.status.phase != Phase::Connected {
             return;
         }
         log::info!("VPN connection went down");
@@ -611,23 +730,28 @@ fn spawn_watcher(nm: Nm, shared: Arc<Mutex<Shared>>, tx: Sender<Cmd>) {
         .name("nm-watcher".into())
         .spawn(move || {
             let res = nm.watch_active_states(|path, state| {
-                let (ours, our_uuid, proxy) = {
+                let (ours, our_uuid) = {
                     let sh = shared.lock().unwrap();
-                    (sh.active.as_deref() == Some(path), sh.uuid.clone(), sh.proxy_handle)
+                    (sh.active.as_deref() == Some(path), sh.uuid.clone())
                 };
                 if ours {
                     if state == ActiveState::Deactivated {
-                        let _ = tx.send(Cmd::ExternalDown);
+                        let _ = tx.send(Cmd::ExternalDown(path.to_owned()));
                     }
                 } else if state == ActiveState::Activated
-                    && let Some(handle) = proxy
+                    && let Some(handle) = *PROXY.lock().unwrap()
                     // Our own VPN coming up is not a network change.
                     && nm.active_uuid(path).is_some_and(|u| Some(u) != our_uuid)
                 {
                     // The underlying network changed, ProxyGuard has to reconnect.
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_secs(1));
-                        common::ProxyGuard::restart(handle);
+                        // Holding the lock keeps teardown from stopping the tunnel meanwhile.
+                        // Restart returns as soon as the running tunnel picks it up.
+                        let p = PROXY.lock().unwrap();
+                        if *p == Some(handle) {
+                            common::ProxyGuard::restart(handle);
+                        }
                     });
                 }
             });
@@ -664,11 +788,33 @@ pub fn search(query: &str, has_secure_internet: bool) -> Vec<Candidate> {
         })
         .collect();
     if !has_secure_internet {
-        out.extend(common::disco_organizations(query).into_iter().map(|o| Candidate {
-            kind: ServerType::SecureInternet,
-            name: types::tr(&o.display_name),
-            id: o.org_id,
-        }));
+        out.extend(
+            common::disco_organizations(query)
+                .into_iter()
+                .map(|o| Candidate {
+                    kind: ServerType::SecureInternet,
+                    name: types::tr(&o.display_name),
+                    id: o.org_id,
+                }),
+        );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_server_urls() {
+        assert_eq!(normalize_url("vpn.example.org"), "https://vpn.example.org/");
+        assert_eq!(
+            normalize_url(" https://vpn.example.org/ "),
+            "https://vpn.example.org/"
+        );
+        assert_eq!(
+            normalize_url("http://vpn.example.org"),
+            "http://vpn.example.org/"
+        );
+    }
 }

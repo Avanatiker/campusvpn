@@ -22,7 +22,9 @@ pub struct Keyring {
 
 impl Keyring {
     pub fn new(config_dir: PathBuf) -> Self {
-        Self { file: config_dir.join("keys") }
+        Self {
+            file: config_dir.join("keys"),
+        }
     }
 
     fn attributes(server_id: &str, kind: ServerType) -> HashMap<&str, &str> {
@@ -105,11 +107,19 @@ impl Keyring {
 
     fn save_secret_service(&self, server_id: &str, kind: ServerType, secret: &str) -> Result<()> {
         let ss = SecretService::connect(EncryptionType::Dh)?;
-        let collection = ss.get_default_collection().or_else(|_| ss.get_any_collection())?;
+        let collection = ss
+            .get_default_collection()
+            .or_else(|_| ss.get_any_collection())?;
         collection.ensure_unlocked()?;
         let label = format!("eduVPN - {server_id} - OAuth Tokens");
         collection
-            .create_item(&label, Self::attributes(server_id, kind), secret.as_bytes(), true, "text/plain")
+            .create_item(
+                &label,
+                Self::attributes(server_id, kind),
+                secret.as_bytes(),
+                true,
+                "text/plain",
+            )
             .map_err(|e| anyhow!(e))?;
         Ok(())
     }
@@ -157,12 +167,14 @@ impl Keyring {
 /// Writes a file readable only by the current user.
 pub fn write_private(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)?;
+    // `mode` only applies to new files; fix up files created elsewhere.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     f.write_all(content.as_bytes())
 }

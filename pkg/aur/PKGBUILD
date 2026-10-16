@@ -1,0 +1,55 @@
+# Maintainer: Constructor <fractalminds@protonmail.com>
+
+pkgname=eduvpn-rs
+pkgver=0.1.0
+pkgrel=1
+_commonver=5.0.3
+pkgdesc='Unofficial lightweight eduVPN client with system tray and auto-connect'
+arch=('x86_64' 'aarch64')
+url='https://github.com/Avanatiker/eduvpn-rs'
+license=('GPL-3.0-or-later' 'MIT')
+depends=('gtk4' 'libadwaita' 'networkmanager' 'glib2' 'glibc' 'gcc-libs' 'hicolor-icon-theme')
+makedepends=('cargo' 'go')
+optdepends=('networkmanager-openvpn: connect to OpenVPN servers'
+            'gnome-shell-extension-appindicator: tray icon on GNOME')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        "https://codeberg.org/eduVPN/eduvpn-common/releases/download/$_commonver/eduvpn-common-$_commonver.tar.xz"{,.asc})
+sha256sums=('SKIP'
+            '983d0b5a16150b334c14f5d078e815e60a3ead1261e16d28e3c0056892a509c5'
+            'SKIP')
+validpgpkeys=('227FF3F8F829D9A9314D9EBA02BB8048BBFF222C') # eduvpn-common release key
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  # The eduvpn-common Go library (discovery, OAuth, VPN configs), loaded at runtime.
+  cd "$srcdir/eduvpn-common-$_commonver"
+  export CGO_CPPFLAGS="$CPPFLAGS" CGO_CFLAGS="$CFLAGS" CGO_CXXFLAGS="$CXXFLAGS" CGO_LDFLAGS="$LDFLAGS"
+  export GOFLAGS="-buildmode=pie -trimpath -ldflags=-linkmode=external -mod=readonly -modcacherw -tags=release"
+  make
+
+  cd "$srcdir/$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/eduvpn-rs "$pkgdir/usr/bin/eduvpn-rs"
+  install -Dm644 data/io.github.avanatiker.eduvpn-rs.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 data/icons/io.github.avanatiker.eduvpn-rs.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+
+  install -Dm755 "$srcdir/eduvpn-common-$_commonver/lib/libeduvpn_common-$_commonver.so" -t "$pkgdir/usr/lib/eduvpn-rs/"
+  install -Dm644 "$srcdir/eduvpn-common-$_commonver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-eduvpn-common"
+}

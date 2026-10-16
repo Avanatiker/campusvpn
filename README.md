@@ -1,52 +1,85 @@
 # eduvpn-rs
 
-A small eduVPN client for Linux, written in Rust with GTK4/libadwaita.
+An unofficial, lightweight [eduVPN](https://www.eduvpn.org/) client for Linux, written in
+Rust with GTK 4 and libadwaita.
 
-- **System tray**: status icon with connect/disconnect, server switching, and show/quit.
-  Closing the window keeps it running in the tray.
-- **Auto-connect** to the last used server on start, after the network is up.
-- **Start on login** (optionally hidden in the tray).
-- WireGuard, OpenVPN and WireGuard over TCP (ProxyGuard). If UDP is blocked it falls back to TCP.
+> **Not affiliated with eduVPN, GÉANT or SURF.** eduVPN is a service of GÉANT and its
+> partners; this is an independent client. For the official app see
+> [codeberg.org/eduVPN/linux-app](https://codeberg.org/eduVPN/linux-app).
+
+## Features
+
+- **System tray**: status icon with connect/disconnect, server switching, show and quit.
+  Closing the window keeps the app running in the tray.
+- **Auto-connect** to the last used server on start, once the network is up.
+- **Start on login**, optionally hidden in the tray.
+- WireGuard, OpenVPN and WireGuard over TCP (ProxyGuard).
 - Profile and Secure Internet location switching, session renewal.
 
-The protocol work (discovery, OAuth login, token refresh, fetching VPN configs) is done by
-the official [eduvpn-common](https://codeberg.org/eduVPN/eduvpn-common) Go library, loaded
-at runtime, the same way the official Python client does. The VPN itself is created through
-NetworkManager.
+The protocol work (server discovery, OAuth login, token refresh, fetching VPN configs) is done
+by the official [eduvpn-common](https://codeberg.org/eduVPN/eduvpn-common) library, loaded at
+runtime, as the official client does. The VPN itself is set up through NetworkManager.
 
-## Requirements
+## Install
 
-- NetworkManager (plus `networkmanager-openvpn` for OpenVPN servers)
-- GTK 4.14+, libadwaita 1.5+
-- `libeduvpn_common-5.x.so`. On Arch it comes with `python-eduvpn-common`; it is found
-  automatically in the usual library dirs, Python site-packages, `~/.local/lib/eduvpn-rs/`
-  or next to the binary. Override with `EDUVPN_COMMON_LIB=/path/to/lib.so`.
-- A Secret Service (KWallet or GNOME Keyring) for tokens. Without one, tokens go to
-  `~/.config/eduvpn/keys` (mode 600).
-- For the tray on GNOME: the AppIndicator extension. KDE, Xfce, Cinnamon etc. work out of the box.
-
-## Build and install
+### Arch Linux (AUR)
 
 ```sh
-make install          # installs to ~/.local (binary, desktop entry, icon)
-eduvpn-rs             # or start "eduVPN" from the app menu
+paru -S eduvpn-rs      # or yay, or makepkg from https://aur.archlinux.org/packages/eduvpn-rs
+```
+
+The package builds eduvpn-common itself; no Python is needed.
+
+### From source
+
+Requirements:
+
+- Rust 1.92+, GTK 4.14+, libadwaita 1.5+
+- NetworkManager, plus `networkmanager-openvpn` for OpenVPN servers
+- `libeduvpn_common-5.x.so`. Build it from
+  [eduvpn-common](https://codeberg.org/eduVPN/eduvpn-common) with `make` (needs Go), or use
+  the one shipped with the `python-eduvpn_common` package. It is found in `/usr/lib/eduvpn-rs/`,
+  the usual library dirs, Python site-packages, `~/.local/lib/eduvpn-rs/` or next to the
+  binary. Override with `EDUVPN_COMMON_LIB=/path/to/libeduvpn_common-5.x.so`.
+
+```sh
+make install           # installs to ~/.local (binary, desktop entry, icon)
+eduvpn-rs              # or start "eduvpn-rs" from the app menu
 ```
 
 Enable "Start on login" in Settings for autostart.
 
+### Desktop notes
+
+- Tokens are stored in the Secret Service (KWallet, GNOME Keyring). Without one they are
+  written to `~/.config/eduvpn/keys` with mode 600.
+- The tray uses StatusNotifierItem: works on KDE, Xfce, Cinnamon, etc. On GNOME install the
+  AppIndicator extension. Without a tray, closing the window quits the app.
+
 ## Compatibility with the official client
 
-It uses the same config dir (`~/.config/eduvpn`), client ID and keyring entries as the
-official Python client, so your servers and logins carry over. Do not run both at the same time.
+eduvpn-rs uses the same config directory (`~/.config/eduvpn`), OAuth client ID and keyring
+entries as the official Linux client, so servers and logins carry over in both directions.
+Don't run both at the same time.
 
-## Options
+## Usage
 
 ```
+eduvpn-rs              open the window
 eduvpn-rs --hidden     start in the tray only
 RUST_LOG=debug eduvpn-rs
 ```
 
-## Tests
+## Development
 
-`cargo test -- --ignored` runs tests that add (but never activate) dummy WireGuard and
-OpenVPN connections in NetworkManager and remove them again.
+```sh
+cargo test                 # unit tests
+cargo test -- --ignored    # adds (never activates) dummy WireGuard/OpenVPN connections
+                           # in NetworkManager and removes them again
+```
+
+## License
+
+GPL-3.0-or-later. Parts of the connection logic follow the official eduVPN Linux client
+(GPL-3.0-or-later). eduvpn-common, built into the AUR package, is MIT licensed.
+The eduVPN logo is not included: it is reserved for the official eduVPN applications.

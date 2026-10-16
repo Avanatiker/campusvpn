@@ -2,14 +2,20 @@
 name = "eduvpn-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Lightweight eduVPN client for Linux with system tray and auto-connect"
+description = "Unofficial lightweight eduVPN client for Linux with system tray and auto-connect"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/Avanatiker/eduvpn-rs"
+readme = "README.md"
+keywords = ["eduvpn", "vpn", "wireguard", "gtk4", "tray"]
+categories = ["network-programming", "gui"]
+rust-version = "1.92"
 
 [dependencies]
 adw = { version = "0.9.2", package = "libadwaita", features = ["v1_5"] }
 anyhow = "1.0.104"
 async-channel = "2.5.0"
 env_logger = "0.11.11"
+glib-unix = "0.22"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_14"] }
 ipnet = "2.12.2"
 ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }

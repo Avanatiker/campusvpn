@@ -1,6 +1,7 @@
 //! System tray icon (StatusNotifierItem), works natively on KDE and with the AppIndicator
 //! extension on GNOME.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
 use ksni::menu::{CheckmarkItem, StandardItem, SubMenu};
@@ -9,6 +10,9 @@ use ksni::{Icon, MenuItem, ToolTip};
 use crate::backend::{self, Cmd, Phase, Status};
 use crate::types::Server;
 use crate::ui::UiMsg;
+
+/// Whether a StatusNotifierWatcher (the panel's tray) currently shows our icon.
+pub static TRAY_SHOWN: AtomicBool = AtomicBool::new(true);
 
 pub struct VpnTray {
     pub status: Status,
@@ -20,8 +24,15 @@ pub struct VpnTray {
 
 impl VpnTray {
     pub fn new(cmd: Sender<Cmd>, ui: async_channel::Sender<UiMsg>) -> Self {
-        let icons = [IconKind::Off, IconKind::Busy, IconKind::On].map(|k| [22, 32, 48, 64].map(|s| render(k, s)).to_vec());
-        Self { status: Status::default(), servers: Vec::new(), cmd, ui, icons }
+        let icons = [IconKind::Off, IconKind::Busy, IconKind::On]
+            .map(|k| [22, 32, 48, 64].map(|s| render(k, s)).to_vec());
+        Self {
+            status: Status::default(),
+            servers: Vec::new(),
+            cmd,
+            ui,
+            icons,
+        }
     }
 
     fn status_text(&self) -> String {
@@ -37,6 +48,17 @@ impl VpnTray {
 }
 
 impl ksni::Tray for VpnTray {
+    fn watcher_online(&self) {
+        TRAY_SHOWN.store(true, Ordering::SeqCst);
+    }
+
+    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+        log::info!("system tray not available: {reason:?}");
+        TRAY_SHOWN.store(false, Ordering::SeqCst);
+        // Keep the service: the panel may (re)start later, e.g. during login.
+        true
+    }
+
     fn id(&self) -> String {
         "eduvpn-rs".into()
     }
@@ -59,7 +81,11 @@ impl ksni::Tray for VpnTray {
     }
 
     fn tool_tip(&self) -> ToolTip {
-        ToolTip { title: "eduVPN".into(), description: self.status_text(), ..Default::default() }
+        ToolTip {
+            title: "eduVPN".into(),
+            description: self.status_text(),
+            ..Default::default()
+        }
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -68,7 +94,12 @@ impl ksni::Tray for VpnTray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items: Vec<MenuItem<Self>> = vec![
-            StandardItem { label: self.status_text(), enabled: false, ..Default::default() }.into(),
+            StandardItem {
+                label: self.status_text(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
         ];
         let (label, icon) = match self.status.phase {
             Phase::Connected => ("Disconnect", "network-disconnect"),
@@ -104,14 +135,25 @@ impl ksni::Tray for VpnTray {
                         label: s.name.replace('_', "__"),
                         checked: current.as_ref() == Some(&(s.kind, s.id.clone())),
                         activate: Box::new(move |t: &mut Self| {
-                            let _ = t.cmd.send(Cmd::Connect { kind, id: id.clone() });
+                            let _ = t.cmd.send(Cmd::Connect {
+                                kind,
+                                id: id.clone(),
+                            });
                         }),
                         ..Default::default()
                     }
                     .into()
                 })
                 .collect();
-            items.push(SubMenu { label: "Servers".into(), icon_name: "network-server".into(), submenu, ..Default::default() }.into());
+            items.push(
+                SubMenu {
+                    label: "Servers".into(),
+                    icon_name: "network-server".into(),
+                    submenu,
+                    ..Default::default()
+                }
+                .into(),
+            );
         }
         items.push(MenuItem::Separator);
         items.push(
@@ -175,9 +217,16 @@ fn render(kind: IconKind, size: i32) -> Icon {
                     }
                     let mark = match kind {
                         IconKind::On => {
-                            seg_dist(x, y, (0.33, 0.50), (0.45, 0.62)).min(seg_dist(x, y, (0.45, 0.62), (0.68, 0.36))) < 0.05
+                            seg_dist(x, y, (0.33, 0.50), (0.45, 0.62)).min(seg_dist(
+                                x,
+                                y,
+                                (0.45, 0.62),
+                                (0.68, 0.36),
+                            )) < 0.05
                         }
-                        IconKind::Busy => [0.33, 0.5, 0.67].iter().any(|cx| (x - cx).powi(2) + (y - 0.49).powi(2) < 0.055f32.powi(2)),
+                        IconKind::Busy => [0.33, 0.5, 0.67]
+                            .iter()
+                            .any(|cx| (x - cx).powi(2) + (y - 0.49).powi(2) < 0.055f32.powi(2)),
                         IconKind::Off => false,
                     };
                     if mark { white += 1.0 } else { fill += 1.0 }
@@ -185,11 +234,26 @@ fn render(kind: IconKind, size: i32) -> Icon {
             }
             let total = (SS * SS) as f32;
             let a = (fill + white) / total;
-            let px_color = |c: f32| if a > 0.0 { ((c * fill + 255.0 * white) / (fill + white)) as u8 } else { 0 };
-            data.extend_from_slice(&[(a * 255.0) as u8, px_color(color[0]), px_color(color[1]), px_color(color[2])]);
+            let px_color = |c: f32| {
+                if a > 0.0 {
+                    ((c * fill + 255.0 * white) / (fill + white)) as u8
+                } else {
+                    0
+                }
+            };
+            data.extend_from_slice(&[
+                (a * 255.0) as u8,
+                px_color(color[0]),
+                px_color(color[1]),
+                px_color(color[2]),
+            ]);
         }
     }
-    Icon { width: size, height: size, data }
+    Icon {
+        width: size,
+        height: size,
+        data,
+    }
 }
 
 /// Distance inside the shield outline (negative = outside).
@@ -200,7 +264,11 @@ fn shield_depth(x: f32, y: f32) -> f32 {
     }
     let t = ((y - mid) / (bottom - mid)).max(0.0);
     // Rounded sides that narrow into a point at the bottom.
-    let hw = if y <= mid { half } else { half * (1.0 - t * t).max(0.0).sqrt() * (1.0 - 0.45 * t) };
+    let hw = if y <= mid {
+        half
+    } else {
+        half * (1.0 - t * t).max(0.0).sqrt() * (1.0 - 0.45 * t)
+    };
     let side = hw - (x - 0.5).abs();
     if side < 0.0 {
         return -1.0;
@@ -226,12 +294,21 @@ mod tests {
     fn dump_icons() {
         use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
         let dir = std::env::var("ICON_DUMP_DIR").unwrap();
-        for (name, kind) in [("off", IconKind::Off), ("busy", IconKind::Busy), ("on", IconKind::On)] {
+        for (name, kind) in [
+            ("off", IconKind::Off),
+            ("busy", IconKind::Busy),
+            ("on", IconKind::On),
+        ] {
             let icon = render(kind, 64);
             // ARGB -> RGBA
-            let rgba: Vec<u8> = icon.data.chunks(4).flat_map(|p| [p[1], p[2], p[3], p[0]]).collect();
+            let rgba: Vec<u8> = icon
+                .data
+                .chunks(4)
+                .flat_map(|p| [p[1], p[2], p[3], p[0]])
+                .collect();
             let pb = Pixbuf::from_mut_slice(rgba, Colorspace::Rgb, true, 8, 64, 64, 64 * 4);
-            pb.savev(format!("{dir}/tray-{name}.png"), "png", &[]).unwrap();
+            pb.savev(format!("{dir}/tray-{name}.png"), "png", &[])
+                .unwrap();
         }
     }
 }

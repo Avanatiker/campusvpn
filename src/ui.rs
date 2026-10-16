@@ -12,7 +12,7 @@ use gtk::{gdk, gio, glib};
 use crate::backend::{self, Cmd, Ev, Phase, Status};
 use crate::common;
 use crate::settings::{self, Settings};
-use crate::tray::VpnTray;
+use crate::tray::{TRAY_SHOWN, VpnTray};
 use crate::types::{Candidate, Server, ServerType};
 
 /// Messages from the tray to the UI thread.
@@ -67,13 +67,17 @@ struct Ui {
     settings: Arc<Mutex<Settings>>,
     cmd: Sender<Cmd>,
     tray: RefCell<Option<ksni::blocking::Handle<VpnTray>>>,
-    oauth_dialog: RefCell<Option<adw::AlertDialog>>,
-    ask_dialog: RefCell<Option<adw::Dialog>>,
+    /// Dialogs waiting on eduvpn-common, with a flag set when they are closed by us
+    /// rather than dismissed by the user (which would cancel the operation).
+    oauth_dialog: RefCell<Option<(adw::AlertDialog, Rc<Cell<bool>>)>>,
+    ask_dialog: RefCell<Option<(adw::Dialog, Rc<Cell<bool>>)>>,
     quitting: Cell<bool>,
 }
 
 pub fn run(start_hidden: bool) -> glib::ExitCode {
-    let app = adw::Application::builder().application_id(settings::APP_ID).build();
+    let app = adw::Application::builder()
+        .application_id(settings::APP_ID)
+        .build();
     let ui: Rc<RefCell<Option<Rc<Ui>>>> = Rc::default();
     app.connect_activate(move |app| {
         if let Some(ui) = ui.borrow().as_ref() {
@@ -82,8 +86,32 @@ pub fn run(start_hidden: bool) -> glib::ExitCode {
             return;
         }
         let built = build(app);
-        if !(start_hidden && built.tray.borrow().is_some()) {
+        if !start_hidden || built.tray.borrow().is_none() {
             built.show();
+        } else {
+            // Starting hidden only makes sense with a tray; give the panel time to come up.
+            let weak = Rc::downgrade(&built);
+            glib::timeout_add_seconds_local_once(15, move || {
+                if let Some(ui) = weak.upgrade()
+                    && !ui.tray_shown()
+                {
+                    ui.show();
+                }
+            });
+        }
+        // Quit cleanly on logout / Ctrl+C, so a TCP tunnel is not left behind dead.
+        for signal in [
+            15, /* SIGTERM */
+            2,  /* SIGINT */
+            1,  /* SIGHUP */
+        ] {
+            let weak = Rc::downgrade(&built);
+            glib_unix::unix_signal_add_local(signal, move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.quit();
+                }
+                glib::ControlFlow::Continue
+            });
         }
         *ui.borrow_mut() = Some(built);
     });
@@ -98,7 +126,7 @@ macro_rules! icons {
 }
 
 const ICONS: &[(&str, &str)] = icons![
-    "org.eduvpn.rs",
+    "io.github.avanatiker.eduvpn-rs",
     "eduvpn-shield-on-symbolic",
     "eduvpn-shield-busy-symbolic",
     "eduvpn-shield-off-symbolic",
@@ -111,7 +139,9 @@ const ICONS: &[(&str, &str)] = icons![
 fn install_icons(display: &gdk::Display) {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
+        });
     let dir = base.join("eduvpn-rs").join("icons");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::warn!("creating icon cache: {e}");
@@ -128,7 +158,11 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     install_icons(&display);
     let provider = gtk::CssProvider::new();
     provider.load_from_string(CSS);
-    gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
     gtk::Window::set_default_icon_name(settings::APP_ID);
     // Keep running while the window is hidden in the tray.
     std::mem::forget(app.hold());
@@ -139,21 +173,43 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
 
     // ---- Home page ----
-    let badge_icon = gtk::Image::builder().icon_name("eduvpn-shield-off-symbolic").pixel_size(52).build();
-    let badge = gtk::Box::builder().halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["status-badge"]).build();
+    let badge_icon = gtk::Image::builder()
+        .icon_name("eduvpn-shield-off-symbolic")
+        .pixel_size(52)
+        .build();
+    let badge = gtk::Box::builder()
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["status-badge"])
+        .build();
     badge_icon.set_hexpand(true);
     badge_icon.set_vexpand(true);
     badge.append(&badge_icon);
-    let title = gtk::Label::builder().label("Not connected").css_classes(["title-1"]).build();
-    let subtitle = gtk::Label::builder().css_classes(["dim-label"]).wrap(true).justify(gtk::Justification::Center).build();
-    let details = gtk::Label::builder().css_classes(["caption", "dim-label"]).wrap(true).justify(gtk::Justification::Center).build();
+    let title = gtk::Label::builder()
+        .label("Not connected")
+        .css_classes(["title-1"])
+        .build();
+    let subtitle = gtk::Label::builder()
+        .css_classes(["dim-label"])
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .build();
+    let details = gtk::Label::builder()
+        .css_classes(["caption", "dim-label"])
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .build();
     let main_button = gtk::Button::builder()
         .label("Connect")
         .halign(gtk::Align::Center)
         .css_classes(["pill", "suggested-action", "main-button"])
         .build();
 
-    let hero = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).margin_top(12).build();
+    let hero = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .margin_top(12)
+        .build();
     hero.append(&badge);
     let spacer = gtk::Box::builder().height_request(8).build();
     hero.append(&spacer);
@@ -163,7 +219,11 @@ fn build(app: &adw::Application) -> Rc<Ui> {
 
     let conn_group = adw::PreferencesGroup::new();
     let servers_group = adw::PreferencesGroup::builder().title("Servers").build();
-    let add_small = gtk::Button::builder().icon_name("list-add-symbolic").css_classes(["flat"]).tooltip_text("Add server").build();
+    let add_small = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .css_classes(["flat"])
+        .tooltip_text("Add server")
+        .build();
     servers_group.set_header_suffix(Some(&add_small));
 
     let home_box = gtk::Box::builder()
@@ -180,7 +240,12 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     home_box.append(&servers_group);
     let home_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&adw::Clamp::builder().maximum_size(480).child(&home_box).build())
+        .child(
+            &adw::Clamp::builder()
+                .maximum_size(480)
+                .child(&home_box)
+                .build(),
+        )
         .vexpand(true)
         .build();
 
@@ -190,14 +255,21 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .css_classes(["pill", "suggested-action", "main-button"])
         .build();
     let empty = adw::StatusPage::builder()
-        .icon_name("org.eduvpn.rs")
+        .icon_name("io.github.avanatiker.eduvpn-rs")
         .title("Welcome to eduVPN")
-        .description("Find your institution or enter the address of your VPN server to get started.")
+        .description(
+            "Find your institution or enter the address of your VPN server to get started.",
+        )
         .child(&add_first)
         .build();
-    let loading = adw::StatusPage::builder().title("Starting…").child(&gtk::Spinner::builder().spinning(true).build()).build();
+    let loading = adw::StatusPage::builder()
+        .title("Starting…")
+        .child(&gtk::Spinner::builder().spinning(true).build())
+        .build();
 
-    let home_stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
+    let home_stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .build();
     home_stack.add_named(&loading, Some("loading"));
     home_stack.add_named(&home_scroll, Some("home"));
     home_stack.add_named(&empty, Some("empty"));
@@ -208,11 +280,21 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     menu.append(Some("About eduVPN"), Some("app.about"));
     menu.append(Some("Quit"), Some("app.quit"));
     let header = adw::HeaderBar::new();
-    header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).primary(true).build());
+    header.pack_end(
+        &gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .menu_model(&menu)
+            .primary(true)
+            .build(),
+    );
     let home_view = adw::ToolbarView::new();
     home_view.add_top_bar(&header);
     home_view.set_content(Some(&home_stack));
-    let home_page = adw::NavigationPage::builder().title("eduVPN").tag("home").child(&home_view).build();
+    let home_page = adw::NavigationPage::builder()
+        .title("eduVPN")
+        .tag("home")
+        .child(&home_view)
+        .build();
 
     let nav = adw::NavigationView::new();
     nav.add(&home_page);
@@ -232,7 +314,11 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     // ---- Tray ----
     let tray = {
         use ksni::blocking::TrayMethods;
-        match VpnTray::new(cmd_tx.clone(), ui_tx.clone()).spawn() {
+        // At login the panel may start after us; register as soon as it appears.
+        match VpnTray::new(cmd_tx.clone(), ui_tx.clone())
+            .assume_sni_available(true)
+            .spawn()
+        {
             Ok(h) => Some(h),
             Err(e) => {
                 log::warn!("system tray not available: {e}");
@@ -279,7 +365,10 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             }
             Phase::Connected => ui.send(Cmd::Disconnect),
             Phase::Disconnected => match ui.status.borrow().server.clone() {
-                Some(s) => ui.send(Cmd::Connect { kind: s.kind, id: s.id }),
+                Some(s) => ui.send(Cmd::Connect {
+                    kind: s.kind,
+                    id: s.id,
+                }),
                 None => ui.send(Cmd::Toggle),
             },
             Phase::Disconnecting => {}
@@ -295,11 +384,13 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     }
     let weak = Rc::downgrade(&ui);
     ui.window.connect_close_request(move |w| {
-        let Some(ui) = weak.upgrade() else { return glib::Propagation::Proceed };
+        let Some(ui) = weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
         if ui.quitting.get() {
             return glib::Propagation::Proceed;
         }
-        if ui.settings.lock().unwrap().close_to_tray && ui.tray.borrow().is_some() {
+        if ui.settings.lock().unwrap().close_to_tray && ui.tray_shown() {
             w.set_visible(false);
         } else {
             ui.quit();
@@ -339,7 +430,9 @@ fn build(app: &adw::Application) -> Rc<Ui> {
             let Some(ui) = weak.upgrade() else { break };
             match msg {
                 UiMsg::Show => ui.show(),
-                UiMsg::Toggle if ui.window.is_visible() && ui.window.is_active() => ui.window.set_visible(false),
+                UiMsg::Toggle if ui.window.is_visible() && ui.window.is_active() => {
+                    ui.window.set_visible(false)
+                }
                 UiMsg::Toggle => ui.show(),
                 UiMsg::Quit => ui.quit(),
             }
@@ -360,6 +453,10 @@ fn build(app: &adw::Application) -> Rc<Ui> {
 }
 
 impl Ui {
+    fn tray_shown(&self) -> bool {
+        self.tray.borrow().is_some() && TRAY_SHOWN.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn send(&self, cmd: Cmd) {
         let _ = self.cmd.send(cmd);
     }
@@ -385,7 +482,12 @@ impl Ui {
 
     fn toast(&self, msg: &str) {
         if self.window.is_visible() {
-            self.toasts.add_toast(adw::Toast::builder().title(glib::markup_escape_text(msg)).timeout(5).build());
+            self.toasts.add_toast(
+                adw::Toast::builder()
+                    .title(glib::markup_escape_text(msg))
+                    .timeout(5)
+                    .build(),
+            );
         } else {
             let n = gio::Notification::new("eduVPN");
             n.set_body(Some(msg));
@@ -429,20 +531,22 @@ impl Ui {
                 self.update_tray();
             }
             Ev::OAuth(url) => self.show_oauth(&url),
-            Ev::OAuthDone => {
-                if let Some(d) = self.oauth_dialog.borrow_mut().take() {
-                    d.force_close();
-                }
-            }
+            Ev::OAuthDone => self.close_pending_dialogs(),
             Ev::AskProfile { cookie, profiles } => self.ask(
                 "Choose a profile",
                 cookie,
-                profiles.into_iter().map(|(id, name)| (id, name, None)).collect(),
+                profiles
+                    .into_iter()
+                    .map(|(id, name)| (id, name, None))
+                    .collect(),
             ),
             Ev::AskLocation { cookie, locations } => self.ask(
                 "Choose a location",
                 cookie,
-                locations.into_iter().map(|cc| (cc.clone(), country_name(&cc), Some(flag(&cc)))).collect(),
+                locations
+                    .into_iter()
+                    .map(|cc| (cc.clone(), country_name(&cc), Some(flag(&cc))))
+                    .collect(),
             ),
             Ev::Error(msg) => self.toast(&msg),
             Ev::Info(msg) => self.toast(&msg),
@@ -454,7 +558,8 @@ impl Ui {
         let st = self.status.borrow();
         let has_servers = !self.servers.borrow().is_empty();
         // The "loading" page stays until the backend reports for the first time.
-        self.home_stack.set_visible_child_name(if has_servers { "home" } else { "empty" });
+        self.home_stack
+            .set_visible_child_name(if has_servers { "home" } else { "empty" });
 
         for c in ["connected", "connecting"] {
             self.badge.remove_css_class(c);
@@ -496,7 +601,11 @@ impl Ui {
             Some(s) => {
                 let mut parts = vec![s.name.clone()];
                 if s.kind == ServerType::SecureInternet && !s.country_code.is_empty() {
-                    parts.push(format!("{} {}", flag(&s.country_code), country_name(&s.country_code)));
+                    parts.push(format!(
+                        "{} {}",
+                        flag(&s.country_code),
+                        country_name(&s.country_code)
+                    ));
                 }
                 if s.profiles.map.len() > 1
                     && let Some(p) = s.current_profile_name()
@@ -549,7 +658,11 @@ impl Ui {
             };
             row.add_prefix(&gtk::Image::from_icon_name(icon));
             if current.as_ref() == Some(&(s.kind, s.id.clone())) {
-                let mark = gtk::Image::from_icon_name(if connected { "emblem-ok-symbolic" } else { "object-select-symbolic" });
+                let mark = gtk::Image::from_icon_name(if connected {
+                    "emblem-ok-symbolic"
+                } else {
+                    "object-select-symbolic"
+                });
                 if connected {
                     mark.add_css_class("success");
                 }
@@ -574,9 +687,15 @@ impl Ui {
             row.connect_activated(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     let st = ui.status.borrow().clone();
-                    let is_current = st.server.as_ref().is_some_and(|c| c.kind == kind && c.id == id);
+                    let is_current = st
+                        .server
+                        .as_ref()
+                        .is_some_and(|c| c.kind == kind && c.id == id);
                     if !(is_current && matches!(st.phase, Phase::Connected | Phase::Connecting)) {
-                        ui.send(Cmd::Connect { kind, id: id.clone() });
+                        ui.send(Cmd::Connect {
+                            kind,
+                            id: id.clone(),
+                        });
                     }
                 }
             });
@@ -601,8 +720,15 @@ impl Ui {
         let profiles = server.profiles.sorted();
         if profiles.len() > 1 {
             let names: Vec<&str> = profiles.iter().map(|(_, n)| n.as_str()).collect();
-            let row = adw::ComboRow::builder().title("Profile").model(&gtk::StringList::new(&names)).sensitive(!busy).build();
-            if let Some(i) = profiles.iter().position(|(id, _)| *id == server.profiles.current) {
+            let row = adw::ComboRow::builder()
+                .title("Profile")
+                .model(&gtk::StringList::new(&names))
+                .sensitive(!busy)
+                .build();
+            if let Some(i) = profiles
+                .iter()
+                .position(|(id, _)| *id == server.profiles.current)
+            {
                 row.set_selected(i as u32);
             }
             let cmd = self.cmd.clone();
@@ -621,10 +747,20 @@ impl Ui {
         if server.kind == ServerType::SecureInternet && server.locations.len() > 1 {
             let mut locs = server.locations.clone();
             locs.sort_by_key(|c| country_name(c));
-            let names: Vec<String> = locs.iter().map(|c| format!("{} {}", flag(c), country_name(c))).collect();
+            let names: Vec<String> = locs
+                .iter()
+                .map(|c| format!("{} {}", flag(c), country_name(c)))
+                .collect();
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            let row = adw::ComboRow::builder().title("Location").model(&gtk::StringList::new(&names)).sensitive(!busy).build();
-            if let Some(i) = locs.iter().position(|c| c.eq_ignore_ascii_case(&server.country_code)) {
+            let row = adw::ComboRow::builder()
+                .title("Location")
+                .model(&gtk::StringList::new(&names))
+                .sensitive(!busy)
+                .build();
+            if let Some(i) = locs
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(&server.country_code))
+            {
                 row.set_selected(i as u32);
             }
             let cmd = self.cmd.clone();
@@ -639,13 +775,16 @@ impl Ui {
             self.conn_group.add(&row);
             self.conn_rows.borrow_mut().push(row.upcast());
         }
-        self.conn_group.set_visible(!self.conn_rows.borrow().is_empty());
+        self.conn_group
+            .set_visible(!self.conn_rows.borrow().is_empty());
     }
 
     fn confirm_remove(self: &Rc<Self>, kind: ServerType, id: String, name: &str) {
         let d = adw::AlertDialog::new(
             Some("Remove server?"),
-            Some(&format!("{name} will be removed and you will have to log in again to use it.")),
+            Some(&format!(
+                "{name} will be removed and you will have to log in again to use it."
+            )),
         );
         d.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
         d.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
@@ -655,54 +794,109 @@ impl Ui {
             let Some(ui) = weak.upgrade() else { return };
             // Don't make the user wait for a connection attempt to this server to finish.
             let st = ui.status.borrow().clone();
-            if st.phase == Phase::Connecting && st.server.as_ref().is_some_and(|s| s.kind == kind && s.id == id) {
+            if st.phase == Phase::Connecting
+                && st
+                    .server
+                    .as_ref()
+                    .is_some_and(|s| s.kind == kind && s.id == id)
+            {
                 backend::cancel();
             }
-            ui.servers.borrow_mut().retain(|s| !(s.kind == kind && s.id == id));
+            ui.servers
+                .borrow_mut()
+                .retain(|s| !(s.kind == kind && s.id == id));
             ui.render_servers();
             ui.render_status();
-            ui.send(Cmd::RemoveServer { kind, id: id.clone() });
+            ui.send(Cmd::RemoveServer {
+                kind,
+                id: id.clone(),
+            });
         });
         d.present(Some(&self.window));
     }
 
-    fn show_oauth(&self, url: &str) {
+    /// Closes the login / choice dialogs once the operation they belong to has ended.
+    fn close_pending_dialogs(&self) {
+        // Take first: closing emits signals that borrow these cells again.
+        let oauth = self.oauth_dialog.borrow_mut().take();
+        if let Some((d, settled)) = oauth {
+            settled.set(true);
+            d.force_close();
+        }
+        let ask = self.ask_dialog.borrow_mut().take();
+        if let Some((d, settled)) = ask {
+            settled.set(true);
+            d.force_close();
+        }
+    }
+
+    fn show_oauth(self: &Rc<Self>, url: &str) {
         self.show();
+        gtk::UriLauncher::new(url).launch(Some(&self.window), gio::Cancellable::NONE, |res| {
+            if let Err(e) = res {
+                log::error!("opening the browser: {e}");
+            }
+        });
         if self.oauth_dialog.borrow().is_some() {
             return;
         }
+        let settled = Rc::new(Cell::new(false));
         let d = adw::AlertDialog::new(
             Some("Log in with your browser"),
-            Some("A browser window was opened. Log in there and authorise eduVPN; this dialog closes by itself."),
+            Some(
+                "A browser window was opened. Log in there and authorise eduVPN; this dialog closes by itself.",
+            ),
         );
         d.add_responses(&[("cancel", "Cancel"), ("copy", "Copy Link")]);
         d.set_close_response("cancel");
         let url = url.to_owned();
-        let window = self.window.clone();
+        let (weak, flag) = (Rc::downgrade(self), settled.clone());
         d.connect_response(None, move |d, resp| {
+            let Some(ui) = weak.upgrade() else { return };
+            if flag.get() {
+                return;
+            }
             if resp == "copy" {
-                window.clipboard().set_text(&url);
+                ui.window.clipboard().set_text(&url);
                 // Keep waiting for the login.
-                d.present(Some(&window));
+                d.present(Some(&ui.window));
             } else {
+                flag.set(true);
+                ui.oauth_dialog.borrow_mut().take();
                 backend::cancel();
             }
         });
         d.present(Some(&self.window));
-        *self.oauth_dialog.borrow_mut() = Some(d);
+        *self.oauth_dialog.borrow_mut() = Some((d, settled));
     }
 
     /// Lets the user pick a profile or location requested by eduvpn-common.
-    fn ask(self: &Rc<Self>, title: &str, cookie: usize, choices: Vec<(String, String, Option<String>)>) {
+    fn ask(
+        self: &Rc<Self>,
+        title: &str,
+        cookie: usize,
+        choices: Vec<(String, String, Option<String>)>,
+    ) {
         self.show();
-        if let Some(old) = self.ask_dialog.borrow_mut().take() {
+        let old = self.ask_dialog.borrow_mut().take();
+        if let Some((old, settled)) = old {
+            settled.set(true);
             old.force_close();
         }
-        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
         let answered = Rc::new(Cell::new(false));
-        let dialog = adw::Dialog::builder().title(title).content_width(380).build();
+        let dialog = adw::Dialog::builder()
+            .title(title)
+            .content_width(380)
+            .build();
         for (id, name, prefix) in choices {
-            let row = adw::ActionRow::builder().title(glib::markup_escape_text(&name)).activatable(true).build();
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&name))
+                .activatable(true)
+                .build();
             if let Some(p) = prefix {
                 row.add_prefix(&gtk::Label::new(Some(&p)));
             }
@@ -736,14 +930,19 @@ impl Ui {
                 .build(),
         ));
         dialog.set_child(Some(&view));
+        let (weak, flag) = (Rc::downgrade(self), answered.clone());
         dialog.connect_closed(move |_| {
-            if !answered.get() {
+            if let Some(ui) = weak.upgrade() {
+                ui.ask_dialog.borrow_mut().take();
+            }
+            if !flag.get() {
+                // Dismissed by the user: give up on connecting.
                 common::cookie_cancel(cookie);
                 backend::cancel();
             }
         });
         dialog.present(Some(&self.window));
-        *self.ask_dialog.borrow_mut() = Some(dialog);
+        *self.ask_dialog.borrow_mut() = Some((dialog, answered));
     }
 
     fn open_add_page(self: &Rc<Self>) {
@@ -754,7 +953,10 @@ impl Ui {
             .placeholder_text("Institution, organisation or server address")
             .hexpand(true)
             .build();
-        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
         let hint = gtk::Label::builder()
             .label("Search for your institution, or type the address of your own VPN server.")
             .wrap(true)
@@ -776,12 +978,21 @@ impl Ui {
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&adw::Clamp::builder().maximum_size(560).child(&content).build())
+            .child(
+                &adw::Clamp::builder()
+                    .maximum_size(560)
+                    .child(&content)
+                    .build(),
+            )
             .build();
         let view = adw::ToolbarView::new();
         view.add_top_bar(&adw::HeaderBar::new());
         view.set_content(Some(&scroll));
-        let page = adw::NavigationPage::builder().title("Add Server").tag("add").child(&view).build();
+        let page = adw::NavigationPage::builder()
+            .title("Add Server")
+            .tag("add")
+            .child(&view)
+            .build();
 
         let generation = Rc::new(Cell::new(0u64));
         let weak = Rc::downgrade(self);
@@ -799,13 +1010,31 @@ impl Ui {
                 return;
             }
             if looks_like_address(&query) {
-                let address = if query.contains("://") { query.clone() } else { format!("https://{query}") };
-                ui.add_candidate_row(&list, Candidate { kind: ServerType::Custom, name: address.clone(), id: address }, "Own server");
+                let address = if query.contains("://") {
+                    query.clone()
+                } else {
+                    format!("https://{query}")
+                };
+                ui.add_candidate_row(
+                    &list,
+                    Candidate {
+                        kind: ServerType::Custom,
+                        name: address.clone(),
+                        id: address,
+                    },
+                    "Own server",
+                );
             }
-            let has_si = ui.servers.borrow().iter().any(|s| s.kind == ServerType::SecureInternet);
+            let has_si = ui
+                .servers
+                .borrow()
+                .iter()
+                .any(|s| s.kind == ServerType::SecureInternet);
             let (list, generation, weak) = (list.clone(), generation.clone(), Rc::downgrade(&ui));
             glib::spawn_future_local(async move {
-                let found = gio::spawn_blocking(move || backend::search(&query, has_si)).await.unwrap_or_default();
+                let found = gio::spawn_blocking(move || backend::search(&query, has_si))
+                    .await
+                    .unwrap_or_default();
                 let Some(ui) = weak.upgrade() else { return };
                 if generation.get() != gen_now {
                     return;
@@ -839,7 +1068,7 @@ impl Ui {
 
     fn open_settings(self: &Rc<Self>) {
         let s = self.settings.lock().unwrap().clone();
-        let has_tray = self.tray.borrow().is_some();
+        let has_tray = self.tray_shown();
         let page = adw::PreferencesPage::new();
 
         let startup = adw::PreferencesGroup::builder().title("Startup").build();
@@ -857,16 +1086,53 @@ impl Ui {
             }
         });
         startup.add(&autostart);
-        startup.add(&self.switch("Start minimised to tray", "Only show the tray icon when started on login", s.start_minimized && has_tray, has_tray, |s, v| s.start_minimized = v));
-        startup.add(&self.switch("Connect automatically", "Connect to the last used server on start", s.autoconnect, true, |s, v| s.autoconnect = v));
+        startup.add(&self.switch(
+            "Start minimised to tray",
+            "Only show the tray icon when started on login",
+            s.start_minimized && has_tray,
+            has_tray,
+            |s, v| s.start_minimized = v,
+        ));
+        startup.add(&self.switch(
+            "Connect automatically",
+            "Connect to the last used server on start",
+            s.autoconnect,
+            true,
+            |s, v| s.autoconnect = v,
+        ));
 
         let window_group = adw::PreferencesGroup::builder().title("Window").build();
-        let tray_sub = if has_tray { "Closing the window keeps eduVPN running in the system tray" } else { "No system tray found on this desktop" };
-        window_group.add(&self.switch("Keep running in tray", tray_sub, s.close_to_tray && has_tray, has_tray, |s, v| s.close_to_tray = v));
+        let tray_sub = if has_tray {
+            "Closing the window keeps eduVPN running in the system tray"
+        } else {
+            "No system tray found on this desktop"
+        };
+        window_group.add(&self.switch(
+            "Keep running in tray",
+            tray_sub,
+            s.close_to_tray && has_tray,
+            has_tray,
+            |s, v| s.close_to_tray = v,
+        ));
 
-        let conn = adw::PreferencesGroup::builder().title("Connection").description("Changes apply on the next connect").build();
-        conn.add(&self.switch("Allow local network access", "Reach printers and other devices on your LAN while connected (WireGuard)", s.allow_lan, true, |s, v| s.allow_lan = v));
-        conn.add(&self.switch("Prefer TCP", "Use when the network blocks UDP traffic", s.prefer_tcp, true, |s, v| s.prefer_tcp = v));
+        let conn = adw::PreferencesGroup::builder()
+            .title("Connection")
+            .description("Changes apply on the next connect")
+            .build();
+        conn.add(&self.switch(
+            "Allow local network access",
+            "Reach printers and other devices on your LAN while connected (WireGuard)",
+            s.allow_lan,
+            true,
+            |s, v| s.allow_lan = v,
+        ));
+        conn.add(&self.switch(
+            "Always use TCP",
+            "Networks where UDP is blocked are detected and remembered automatically",
+            s.prefer_tcp,
+            true,
+            |s, v| s.prefer_tcp = v,
+        ));
 
         page.add(&startup);
         page.add(&window_group);
@@ -876,8 +1142,20 @@ impl Ui {
         dialog.present(Some(&self.window));
     }
 
-    fn switch(&self, title: &str, subtitle: &str, active: bool, sensitive: bool, set: fn(&mut Settings, bool)) -> adw::SwitchRow {
-        let row = adw::SwitchRow::builder().title(title).subtitle(subtitle).active(active).sensitive(sensitive).build();
+    fn switch(
+        &self,
+        title: &str,
+        subtitle: &str,
+        active: bool,
+        sensitive: bool,
+        set: fn(&mut Settings, bool),
+    ) -> adw::SwitchRow {
+        let row = adw::SwitchRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .active(active)
+            .sensitive(sensitive)
+            .build();
         let settings = self.settings.clone();
         row.connect_active_notify(move |r| {
             let mut s = settings.lock().unwrap();
@@ -905,7 +1183,10 @@ fn looks_like_address(q: &str) -> bool {
 }
 
 fn remaining(end: i64) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let secs = end - now;
     if secs <= 0 {
         return "session expired".into();
@@ -931,19 +1212,72 @@ fn flag(cc: &str) -> String {
 
 fn country_name(cc: &str) -> String {
     let name = match cc.to_ascii_uppercase().as_str() {
-        "AL" => "Albania", "AM" => "Armenia", "AT" => "Austria", "AU" => "Australia", "BE" => "Belgium",
-        "BG" => "Bulgaria", "BR" => "Brazil", "CA" => "Canada", "CH" => "Switzerland", "CL" => "Chile",
-        "CY" => "Cyprus", "CZ" => "Czechia", "DE" => "Germany", "DK" => "Denmark", "EE" => "Estonia",
-        "ES" => "Spain", "FI" => "Finland", "FR" => "France", "GB" | "UK" => "United Kingdom", "GE" => "Georgia",
-        "GR" => "Greece", "HR" => "Croatia", "HU" => "Hungary", "IE" => "Ireland", "IL" => "Israel",
-        "IN" => "India", "IS" => "Iceland", "IT" => "Italy", "JP" => "Japan", "KE" => "Kenya", "KR" => "South Korea",
-        "LT" => "Lithuania", "LU" => "Luxembourg", "LV" => "Latvia", "MA" => "Morocco", "MD" => "Moldova",
-        "ME" => "Montenegro", "MK" => "North Macedonia", "MT" => "Malta", "MX" => "Mexico", "NG" => "Nigeria",
-        "NL" => "Netherlands", "NO" => "Norway", "NZ" => "New Zealand", "PL" => "Poland", "PT" => "Portugal",
-        "RO" => "Romania", "RS" => "Serbia", "SE" => "Sweden", "SG" => "Singapore", "SI" => "Slovenia",
-        "SK" => "Slovakia", "TR" => "Türkiye", "UA" => "Ukraine", "UG" => "Uganda", "US" => "United States",
-        "ZA" => "South Africa", "TZ" => "Tanzania", "AR" => "Argentina", "CO" => "Colombia", "PE" => "Peru",
-        "EC" => "Ecuador", "UY" => "Uruguay", "TH" => "Thailand", "MY" => "Malaysia", "ID" => "Indonesia",
+        "AL" => "Albania",
+        "AM" => "Armenia",
+        "AT" => "Austria",
+        "AU" => "Australia",
+        "BE" => "Belgium",
+        "BG" => "Bulgaria",
+        "BR" => "Brazil",
+        "CA" => "Canada",
+        "CH" => "Switzerland",
+        "CL" => "Chile",
+        "CY" => "Cyprus",
+        "CZ" => "Czechia",
+        "DE" => "Germany",
+        "DK" => "Denmark",
+        "EE" => "Estonia",
+        "ES" => "Spain",
+        "FI" => "Finland",
+        "FR" => "France",
+        "GB" | "UK" => "United Kingdom",
+        "GE" => "Georgia",
+        "GR" => "Greece",
+        "HR" => "Croatia",
+        "HU" => "Hungary",
+        "IE" => "Ireland",
+        "IL" => "Israel",
+        "IN" => "India",
+        "IS" => "Iceland",
+        "IT" => "Italy",
+        "JP" => "Japan",
+        "KE" => "Kenya",
+        "KR" => "South Korea",
+        "LT" => "Lithuania",
+        "LU" => "Luxembourg",
+        "LV" => "Latvia",
+        "MA" => "Morocco",
+        "MD" => "Moldova",
+        "ME" => "Montenegro",
+        "MK" => "North Macedonia",
+        "MT" => "Malta",
+        "MX" => "Mexico",
+        "NG" => "Nigeria",
+        "NL" => "Netherlands",
+        "NO" => "Norway",
+        "NZ" => "New Zealand",
+        "PL" => "Poland",
+        "PT" => "Portugal",
+        "RO" => "Romania",
+        "RS" => "Serbia",
+        "SE" => "Sweden",
+        "SG" => "Singapore",
+        "SI" => "Slovenia",
+        "SK" => "Slovakia",
+        "TR" => "Türkiye",
+        "UA" => "Ukraine",
+        "UG" => "Uganda",
+        "US" => "United States",
+        "ZA" => "South Africa",
+        "TZ" => "Tanzania",
+        "AR" => "Argentina",
+        "CO" => "Colombia",
+        "PE" => "Peru",
+        "EC" => "Ecuador",
+        "UY" => "Uruguay",
+        "TH" => "Thailand",
+        "MY" => "Malaysia",
+        "ID" => "Indonesia",
         _ => return cc.to_ascii_uppercase(),
     };
     name.to_owned()

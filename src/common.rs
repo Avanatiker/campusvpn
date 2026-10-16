@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_int};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -46,7 +47,8 @@ type DataFn = unsafe extern "C" fn() -> DataError;
 
 struct Lib {
     _lib: Library,
-    register: unsafe extern "C" fn(*const c_char, *const c_char, *const c_char, StateCb) -> *mut c_char,
+    register:
+        unsafe extern "C" fn(*const c_char, *const c_char, *const c_char, StateCb) -> *mut c_char,
     deregister: StrFn,
     expiry_times: DataFn,
     add_server: unsafe extern "C" fn(usize, c_int, *const c_char, *const i64) -> *mut c_char,
@@ -61,7 +63,8 @@ struct Lib {
     cleanup: unsafe extern "C" fn(usize) -> *mut c_char,
     renew_session: unsafe extern "C" fn(usize) -> *mut c_char,
     start_failover: unsafe extern "C" fn(usize, *const c_char, c_int, ReadRxBytes) -> IntError,
-    new_proxyguard: unsafe extern "C" fn(usize, c_int, c_int, *const c_char, ProxySetup) -> HandleError,
+    new_proxyguard:
+        unsafe extern "C" fn(usize, c_int, c_int, *const c_char, ProxySetup) -> HandleError,
     proxyguard_restart: unsafe extern "C" fn(usize) -> *mut c_char,
     proxyguard_tunnel: unsafe extern "C" fn(usize, usize, c_int) -> *mut c_char,
     proxyguard_peer_ips: unsafe extern "C" fn(usize) -> DataError,
@@ -141,7 +144,9 @@ fn take(ptr: *mut c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+    let s = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
     unsafe { (lib().free_string)(ptr) };
     Some(s)
 }
@@ -170,11 +175,16 @@ fn cstr(s: &str) -> CString {
 }
 
 /// Runs `f` with a fresh cookie that can be cancelled via [`cancel_all`].
+///
+/// Cookies are cgo handles: using one after `CookieDelete` makes Go panic and abort the
+/// process. Every use outside the owning call therefore goes through the JAR lock, and
+/// the cookie is removed from the JAR and deleted under that same lock.
 fn with_cookie<T>(f: impl FnOnce(usize) -> T) -> T {
     let c = unsafe { (lib().cookie_new)() };
     JAR.lock().unwrap().get_or_insert_default().insert(c);
     let out = f(c);
-    JAR.lock().unwrap().get_or_insert_default().remove(&c);
+    let mut jar = JAR.lock().unwrap();
+    jar.get_or_insert_default().remove(&c);
     let _ = go_error(unsafe { (lib().cookie_delete)(c) });
     out
 }
@@ -182,8 +192,9 @@ fn with_cookie<T>(f: impl FnOnce(usize) -> T) -> T {
 /// Cancels every running operation that holds a cookie (OAuth waits, tunnels, ...).
 pub fn cancel_all() {
     let Some(lib) = LIB.get() else { return };
-    let cookies: Vec<usize> = JAR.lock().unwrap().iter().flatten().copied().collect();
-    for c in cookies {
+    // CookieCancel does not block, so holding the lock keeps the cookies alive meanwhile.
+    let jar = JAR.lock().unwrap();
+    for &c in jar.iter().flatten() {
         let _ = go_error(unsafe { (lib.cookie_cancel)(c) });
     }
 }
@@ -199,7 +210,13 @@ fn candidate_dirs() -> Vec<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(Path::new(&home).join(".local/lib/eduvpn-rs"));
     }
-    for d in ["/usr/lib", "/usr/lib64", "/usr/local/lib", "/usr/lib/x86_64-linux-gnu"] {
+    for d in [
+        "/usr/lib/eduvpn-rs",
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/local/lib",
+        "/usr/lib/x86_64-linux-gnu",
+    ] {
         dirs.push(d.into());
     }
     // The python-eduvpn-common package ships the library inside site-packages.
@@ -223,7 +240,9 @@ fn find_library() -> Option<PathBuf> {
         return Some(p.into());
     }
     for dir in candidate_dirs() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut found: Vec<PathBuf> = rd
             .flatten()
             .map(|e| e.path())
@@ -242,7 +261,8 @@ fn find_library() -> Option<PathBuf> {
 
 macro_rules! sym {
     ($lib:expr, $name:literal) => {
-        *unsafe { $lib.get($name) }.with_context(|| format!("missing symbol {}", stringify!($name)))?
+        *unsafe { $lib.get($name) }
+            .with_context(|| format!("missing symbol {}", stringify!($name)))?
     };
 }
 
@@ -251,7 +271,8 @@ pub fn init(config_dir: &Path, version: &str, callbacks: Box<dyn Callbacks>) -> 
     let path = find_library().context(
         "libeduvpn_common 5.x not found. Install python-eduvpn-common or set EDUVPN_COMMON_LIB",
     )?;
-    let l = unsafe { Library::new(&path) }.with_context(|| format!("loading {}", path.display()))?;
+    let l =
+        unsafe { Library::new(&path) }.with_context(|| format!("loading {}", path.display()))?;
     let loaded = Lib {
         register: sym!(l, b"Register"),
         deregister: sym!(l, b"Deregister"),
@@ -290,7 +311,11 @@ pub fn init(config_dir: &Path, version: &str, callbacks: Box<dyn Callbacks>) -> 
         bail!("callbacks already set");
     }
 
-    std::fs::create_dir_all(config_dir)?;
+    // Same mode as eduvpn-common and the official client: the directory holds VPN state.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(config_dir)?;
     let name = cstr(CLIENT_ID);
     let ver = cstr(version);
     let dir = cstr(&config_dir.to_string_lossy());
@@ -309,9 +334,13 @@ extern "C" fn state_cb(old: c_int, new: c_int, data: *const c_char) -> c_int {
     let data = if data.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(data) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(data) }
+            .to_string_lossy()
+            .into_owned()
     };
-    if let (Some(cb), Some(old), Some(new)) = (CALLBACKS.get(), State::from_i32(old), State::from_i32(new)) {
+    if let (Some(cb), Some(old), Some(new)) =
+        (CALLBACKS.get(), State::from_i32(old), State::from_i32(new))
+    {
         cb.on_transition(old, new, &data);
     }
     // We handle every transition: OAuth, profile and location requests are all answered.
@@ -325,7 +354,9 @@ extern "C" fn token_getter(server_id: *const c_char, kind: c_int, out: *mut c_ch
     unsafe { *out = 0 };
     let Some(cb) = CALLBACKS.get() else { return };
     let id = unsafe { CStr::from_ptr(server_id) }.to_string_lossy();
-    let Some(tokens) = cb.load_tokens(&id, ServerType::from(kind)) else { return };
+    let Some(tokens) = cb.load_tokens(&id, ServerType::from(kind)) else {
+        return;
+    };
     let bytes = tokens.as_bytes();
     if bytes.len() + 1 > len {
         log::warn!("tokens do not fit in the buffer given by eduvpn-common");
@@ -362,7 +393,9 @@ pub fn server_list() -> Result<Vec<types::Server>> {
 
 pub fn current_server() -> Option<types::Server> {
     let json = go_data(unsafe { (lib().current_server)() }).ok()?;
-    serde_json::from_str::<types::CurrentServer>(&json).ok()?.into_server()
+    serde_json::from_str::<types::CurrentServer>(&json)
+        .ok()?
+        .into_server()
 }
 
 pub fn expiry() -> Option<types::Expiry> {
@@ -373,7 +406,9 @@ pub fn expiry() -> Option<types::Expiry> {
 /// Adds a server. Blocks until the user has finished logging in through the browser.
 pub fn add_server(kind: ServerType, id: &str) -> Result<()> {
     let id = cstr(id);
-    with_cookie(|c| go_error(unsafe { (lib().add_server)(c, kind.into(), id.as_ptr(), std::ptr::null()) }))
+    with_cookie(|c| {
+        go_error(unsafe { (lib().add_server)(c, kind.into(), id.as_ptr(), std::ptr::null()) })
+    })
 }
 
 pub fn remove_server(kind: ServerType, id: &str) -> Result<()> {
@@ -382,10 +417,23 @@ pub fn remove_server(kind: ServerType, id: &str) -> Result<()> {
 }
 
 /// Fetches a VPN config. With `startup` set no interaction (OAuth/profile) is triggered.
-pub fn get_config(kind: ServerType, id: &str, prefer_tcp: bool, startup: bool) -> Result<types::VpnConfig> {
+pub fn get_config(
+    kind: ServerType,
+    id: &str,
+    prefer_tcp: bool,
+    startup: bool,
+) -> Result<types::VpnConfig> {
     let id = cstr(id);
     let json = with_cookie(|c| {
-        go_data(unsafe { (lib().get_config)(c, kind.into(), id.as_ptr(), prefer_tcp as c_int, startup as c_int) })
+        go_data(unsafe {
+            (lib().get_config)(
+                c,
+                kind.into(),
+                id.as_ptr(),
+                prefer_tcp as c_int,
+                startup as c_int,
+            )
+        })
     })?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -408,7 +456,9 @@ pub fn disco_servers(search: &str) -> Vec<types::DiscoServer> {
     if let Err(e) = go_error(de.error) {
         log::warn!("server discovery: {e}");
     }
-    serde_json::from_str::<types::DiscoServers>(&data).map(|d| d.server_list).unwrap_or_default()
+    serde_json::from_str::<types::DiscoServers>(&data)
+        .map(|d| d.server_list)
+        .unwrap_or_default()
 }
 
 pub fn disco_organizations(search: &str) -> Vec<types::DiscoOrganization> {
@@ -437,7 +487,9 @@ pub fn renew_session() -> Result<()> {
 pub fn start_failover(gateway: &str, mtu: u32, rx_bytes_file: PathBuf) -> Result<bool> {
     *RX_BYTES_FILE.lock().unwrap() = Some(rx_bytes_file);
     let gw = cstr(gateway);
-    let res = with_cookie(|c| unsafe { (lib().start_failover)(c, gw.as_ptr(), mtu as c_int, read_rx_bytes) });
+    let res = with_cookie(|c| unsafe {
+        (lib().start_failover)(c, gw.as_ptr(), mtu as c_int, read_rx_bytes)
+    });
     go_error(res.error)?;
     Ok(res.value != 0)
 }
@@ -450,7 +502,13 @@ impl ProxyGuard {
     pub fn new(listen_port: u16, source_port: u16, peer: &str) -> Result<Self> {
         let p = cstr(peer);
         let res = with_cookie(|c| unsafe {
-            (lib().new_proxyguard)(c, listen_port.into(), source_port.into(), p.as_ptr(), proxy_setup)
+            (lib().new_proxyguard)(
+                c,
+                listen_port.into(),
+                source_port.into(),
+                p.as_ptr(),
+                proxy_setup,
+            )
         });
         go_error(res.error)?;
         Ok(Self { handle: res.handle })
@@ -463,7 +521,9 @@ impl ProxyGuard {
 
     /// Runs the tunnel until cancelled with [`cancel_all`]. Blocks.
     pub fn tunnel(&self, wg_listen_port: u16) -> Result<()> {
-        with_cookie(|c| go_error(unsafe { (lib().proxyguard_tunnel)(c, self.handle, wg_listen_port.into()) }))
+        with_cookie(|c| {
+            go_error(unsafe { (lib().proxyguard_tunnel)(c, self.handle, wg_listen_port.into()) })
+        })
     }
 
     pub fn restart(handle: usize) {
@@ -501,12 +561,24 @@ pub fn calculate_gateway(subnet: &str) -> Result<String> {
 }
 
 /// Answers an ASK_PROFILE / ASK_LOCATION request.
+///
+/// Does nothing if the request already ended (e.g. it was cancelled meanwhile).
 pub fn cookie_reply(cookie: usize, data: &str) -> Result<()> {
     let d = cstr(data);
+    // The lock is held across the call so the cookie cannot be deleted under us. The
+    // reply only blocks until the waiting GetConfig receives it, and that wait can only
+    // end through this cookie (cancel/delete), which also needs the lock.
+    let jar = JAR.lock().unwrap();
+    if !jar.as_ref().is_some_and(|j| j.contains(&cookie)) {
+        bail!("the request is no longer active");
+    }
     go_error(unsafe { (lib().cookie_reply)(cookie, d.as_ptr()) })
 }
 
 /// Aborts an ASK_PROFILE / ASK_LOCATION request.
 pub fn cookie_cancel(cookie: usize) {
-    let _ = go_error(unsafe { (lib().cookie_cancel)(cookie) });
+    let jar = JAR.lock().unwrap();
+    if jar.as_ref().is_some_and(|j| j.contains(&cookie)) {
+        let _ = go_error(unsafe { (lib().cookie_cancel)(cookie) });
+    }
 }

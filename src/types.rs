@@ -168,7 +168,10 @@ impl Server {
     }
 
     pub fn current_profile_name(&self) -> Option<String> {
-        self.profiles.map.get(&self.profiles.current).map(|p| tr(&p.display_name))
+        self.profiles
+            .map
+            .get(&self.profiles.current)
+            .map(|p| tr(&p.display_name))
     }
 }
 
@@ -180,8 +183,15 @@ impl ServerList {
                 .into_iter()
                 .map(|s| Server::from_raw(s, ServerType::InstituteAccess)),
         );
-        out.extend(self.secure_internet_server.map(|s| Server::from_raw(s, ServerType::SecureInternet)));
-        out.extend(self.custom_servers.into_iter().map(|s| Server::from_raw(s, ServerType::Custom)));
+        out.extend(
+            self.secure_internet_server
+                .map(|s| Server::from_raw(s, ServerType::SecureInternet)),
+        );
+        out.extend(
+            self.custom_servers
+                .into_iter()
+                .map(|s| Server::from_raw(s, ServerType::Custom)),
+        );
         out
     }
 }
@@ -282,4 +292,33 @@ pub struct Candidate {
     pub kind: ServerType,
     pub id: String,
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_server_list() {
+        let json = r#"{"institute_access_servers":[{"display_name":{"en":"Demo"},"identifier":"https://demo.eduvpn.nl/",
+            "profiles":{"map":{"a":{"display_name":{"en":"Low"},"priority":1},"b":{"display_name":{"en":"High"},"priority":5}},"current":"a"},
+            "delisted":false}],"custom_servers":[{"identifier":"https://vpn.example.org/","profiles":{"current":""}}]}"#;
+        let servers = serde_json::from_str::<ServerList>(json)
+            .unwrap()
+            .into_servers();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].kind, ServerType::InstituteAccess);
+        assert_eq!(servers[0].current_profile_name().as_deref(), Some("Low"));
+        assert_eq!(servers[0].profiles.sorted()[0].0, "b");
+        // Servers without a display name fall back to their address.
+        assert_eq!(servers[1].name, "https://vpn.example.org/");
+    }
+
+    #[test]
+    fn parses_ask_profile_transition() {
+        let ask: RequiredAsk<Profiles> =
+            serde_json::from_str(r#"{"cookie":7,"data":{"map":{"x":{}},"current":""}}"#).unwrap();
+        assert_eq!(ask.cookie, 7);
+        assert_eq!(ask.data.sorted().len(), 1);
+    }
 }

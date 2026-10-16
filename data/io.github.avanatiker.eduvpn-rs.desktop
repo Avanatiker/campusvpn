@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=eduVPN
-GenericName=VPN Client
+Name=eduvpn-rs
+GenericName=eduVPN Client
 Comment=Connect to eduVPN with a system tray icon
 Exec=eduvpn-rs
-Icon=org.eduvpn.rs
+Icon=io.github.avanatiker.eduvpn-rs
 Terminal=false
 Categories=Network;
 Keywords=vpn;eduvpn;wireguard;openvpn;
