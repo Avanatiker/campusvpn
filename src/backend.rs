@@ -131,6 +131,8 @@ fn open_browser(url: &str) {
 struct Shared {
     /// D-Bus path of our active VPN connection, cleared before we disconnect on purpose.
     active: Option<String>,
+    /// NetworkManager uuid of our VPN connection, set before it is activated.
+    uuid: Option<String>,
     proxy_handle: Option<usize>,
 }
 
@@ -246,7 +248,11 @@ impl Backend {
                 Some(active) if self.nm.active_state(active.as_str()) == ActiveState::Activated => {
                     log::info!("VPN already connected");
                     common::ensure_state(State::Connected);
-                    self.shared.lock().unwrap().active = Some(active.to_string());
+                    {
+                        let mut sh = self.shared.lock().unwrap();
+                        sh.active = Some(active.to_string());
+                        sh.uuid = Some(uuid.clone());
+                    }
                     self.fill_connected_details(active.as_str());
                     self.set_phase(Phase::Connected);
                     return;
@@ -488,6 +494,7 @@ impl Backend {
             Protocol::Unknown => bail!("server returned an unknown VPN protocol"),
         };
         self.set_uuid(&uuid);
+        self.shared.lock().unwrap().uuid = Some(uuid.clone());
 
         let active = self.nm.activate(&uuid, &CANCEL)?;
         self.shared.lock().unwrap().active = Some(active.to_string());
@@ -602,13 +609,18 @@ fn spawn_watcher(nm: Nm, shared: Arc<Mutex<Shared>>, tx: Sender<Cmd>) {
         .name("nm-watcher".into())
         .spawn(move || {
             let res = nm.watch_active_states(|path, state| {
-                let sh = shared.lock().unwrap();
-                if sh.active.as_deref() == Some(path) {
+                let (ours, our_uuid, proxy) = {
+                    let sh = shared.lock().unwrap();
+                    (sh.active.as_deref() == Some(path), sh.uuid.clone(), sh.proxy_handle)
+                };
+                if ours {
                     if state == ActiveState::Deactivated {
                         let _ = tx.send(Cmd::ExternalDown);
                     }
                 } else if state == ActiveState::Activated
-                    && let Some(handle) = sh.proxy_handle
+                    && let Some(handle) = proxy
+                    // Our own VPN coming up is not a network change.
+                    && nm.active_uuid(path).is_some_and(|u| Some(u) != our_uuid)
                 {
                     // The underlying network changed, ProxyGuard has to reconnect.
                     std::thread::spawn(move || {

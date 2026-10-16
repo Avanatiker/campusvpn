@@ -104,6 +104,10 @@ impl Nm {
         })
     }
 
+    pub fn active_uuid(&self, active: &str) -> Option<String> {
+        self.prop(active, ACTIVE_IFACE, "Uuid").ok()
+    }
+
     pub fn active_state(&self, active: &str) -> ActiveState {
         self.prop::<u32>(active, ACTIVE_IFACE, "State").map(ActiveState::from).unwrap_or(ActiveState::Unknown)
     }
