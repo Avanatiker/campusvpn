@@ -466,10 +466,7 @@ impl Backend {
         self.set_phase(Phase::Connecting);
 
         // UDP being blocked is a property of the network, so remember it per server and network.
-        let udp_key = self
-            .nm
-            .primary_connection_uuid()
-            .map(|net| format!("{id}|{net}"));
+        let udp_key = self.nm.network_key().map(|net| format!("{id}|{net}"));
         let prefer_tcp = {
             let s = self.settings.lock().unwrap();
             s.prefer_tcp

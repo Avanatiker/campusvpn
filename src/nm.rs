@@ -89,12 +89,26 @@ impl Nm {
     }
 
     /// Uuid of the connection NetworkManager uses for the default route (e.g. the current Wi-Fi).
-    pub fn primary_connection_uuid(&self) -> Option<String> {
+    fn primary_connection(&self) -> Option<OwnedObjectPath> {
         let path: OwnedObjectPath = self.prop(NM_PATH, NM, "PrimaryConnection").ok()?;
-        if path.as_str() == "/" {
-            return None;
+        (path.as_str() != "/").then_some(path)
+    }
+
+    /// Identifies the network we are on, for remembering where UDP is blocked.
+    ///
+    /// The MAC address of the default gateway tells apart networks that share one
+    /// connection profile, e.g. eduroam at different sites. Falls back to the
+    /// NetworkManager profile when the gateway is unknown (e.g. IPv6-only).
+    pub fn network_key(&self) -> Option<String> {
+        let primary = self.primary_connection()?;
+        if let Some(mac) = self
+            .ipv4_gateway(primary.as_str())
+            .and_then(|gw| gateway_mac(&std::fs::read_to_string("/proc/net/arp").ok()?, &gw))
+        {
+            return Some(format!("gw:{mac}"));
         }
-        self.active_uuid(path.as_str())
+        self.active_uuid(primary.as_str())
+            .map(|u| format!("nm:{u}"))
     }
 
     /// Global NetworkManager state (NMState). 70 = connected with internet.
@@ -704,6 +718,16 @@ fn parse_ini(s: &str) -> HashMap<String, HashMap<String, String>> {
     out
 }
 
+/// Looks up the MAC address of `ip` in the kernel ARP table (`/proc/net/arp`).
+fn gateway_mac(arp: &str, ip: &str) -> Option<String> {
+    arp.lines().skip(1).find_map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // IP address, HW type, Flags, HW address, Mask, Device; flags 0x0 = incomplete.
+        (cols.len() >= 4 && cols[0] == ip && cols[2] != "0x0" && cols[3] != "00:00:00:00:00:00")
+            .then(|| cols[3].to_ascii_lowercase())
+    })
+}
+
 pub fn wireguard_proxy_endpoint(config: &str) -> Option<String> {
     parse_ini(config).get("Peer")?.get("ProxyEndpoint").cloned()
 }
@@ -768,6 +792,28 @@ mod tests {
             .as_deref(),
             Some("https://vpn.example.org/proxyguard")
         );
+    }
+
+    #[test]
+    fn finds_gateway_mac() {
+        let arp = "IP address       HW type     Flags       HW address            Mask     Device\n\
+                   192.0.2.1        0x1         0x2         C8:0E:14:DF:89:2E     *        enp5s0\n\
+                   192.0.2.9        0x1         0x0         00:00:00:00:00:00     *        enp5s0\n";
+        assert_eq!(
+            gateway_mac(arp, "192.0.2.1").as_deref(),
+            Some("c8:0e:14:df:89:2e")
+        );
+        assert_eq!(gateway_mac(arp, "192.0.2.9"), None);
+        assert_eq!(gateway_mac(arp, "192.0.2.2"), None);
+    }
+
+    /// Needs a running NetworkManager. Prints how the current network is identified.
+    #[test]
+    #[ignore]
+    fn current_network_key() {
+        let key = Nm::new().unwrap().network_key();
+        println!("network key: {key:?}");
+        assert!(key.is_some());
     }
 
     /// Needs a running NetworkManager. The connection is only added, never activated.
