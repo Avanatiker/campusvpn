@@ -10,9 +10,6 @@ and libadwaita.
 > official eduVPN app see [codeberg.org/eduVPN/linux-app](https://codeberg.org/eduVPN/linux-app).
 > CampusVPN does not connect to Cisco AnyConnect or other "campus VPN" services.
 
-Formerly called eduvpn-rs. Settings and the autostart entry are moved over on the first start,
-and the install script removes the old install.
-
 ## Features
 
 - **System tray**: status icon with connect/disconnect, server switching, show and quit.
