@@ -22,7 +22,7 @@ pkgbase = campusvpn
 	source = https://codeberg.org/eduVPN/eduvpn-common/releases/download/5.0.3/eduvpn-common-5.0.3.tar.xz
 	source = https://codeberg.org/eduVPN/eduvpn-common/releases/download/5.0.3/eduvpn-common-5.0.3.tar.xz.asc
 	validpgpkeys = 227FF3F8F829D9A9314D9EBA02BB8048BBFF222C
-	sha256sums = 7f1381bac29a939345f765a0a5329ac29935fa3a3b63f489f15d50ef66ab22ee
+	sha256sums = abdf7bb85321e571034af3489f068a4e808ac3170316951f5758a82e3ef2ed96
 	sha256sums = 983d0b5a16150b334c14f5d078e815e60a3ead1261e16d28e3c0056892a509c5
 	sha256sums = SKIP
 
