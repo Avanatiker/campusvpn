@@ -60,11 +60,11 @@ impl ksni::Tray for VpnTray {
     }
 
     fn id(&self) -> String {
-        "eduvpn-rs".into()
+        "campusvpn".into()
     }
 
     fn title(&self) -> String {
-        "eduVPN".into()
+        "CampusVPN".into()
     }
 
     fn category(&self) -> ksni::Category {
@@ -82,7 +82,7 @@ impl ksni::Tray for VpnTray {
 
     fn tool_tip(&self) -> ToolTip {
         ToolTip {
-            title: "eduVPN".into(),
+            title: "CampusVPN".into(),
             description: self.status_text(),
             ..Default::default()
         }
@@ -158,7 +158,7 @@ impl ksni::Tray for VpnTray {
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
-                label: "Open eduVPN".into(),
+                label: "Open CampusVPN".into(),
                 icon_name: "window-new".into(),
                 activate: Box::new(|t: &mut Self| {
                     let _ = t.ui.try_send(UiMsg::Show);

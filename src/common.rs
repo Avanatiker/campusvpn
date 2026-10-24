@@ -205,13 +205,13 @@ fn candidate_dirs() -> Vec<PathBuf> {
         && let Some(dir) = exe.parent()
     {
         dirs.push(dir.to_path_buf());
-        dirs.push(dir.join("../lib/eduvpn-rs"));
+        dirs.push(dir.join("../lib/campusvpn"));
     }
     if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(Path::new(&home).join(".local/lib/eduvpn-rs"));
+        dirs.push(Path::new(&home).join(".local/lib/campusvpn"));
     }
     for d in [
-        "/usr/lib/eduvpn-rs",
+        "/usr/lib/campusvpn",
         "/usr/lib",
         "/usr/lib64",
         "/usr/local/lib",

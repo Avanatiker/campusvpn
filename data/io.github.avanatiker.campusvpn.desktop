@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CampusVPN
+GenericName=VPN Client
+Comment=Connect to eduVPN and Let's Connect! VPN servers
+Exec=campusvpn
+Icon=io.github.avanatiker.campusvpn
+Terminal=false
+Categories=Network;
+Keywords=vpn;wireguard;openvpn;campus;university;
+StartupNotify=true

@@ -126,23 +126,18 @@ macro_rules! icons {
 }
 
 const ICONS: &[(&str, &str)] = icons![
-    "io.github.avanatiker.eduvpn-rs",
-    "eduvpn-shield-on-symbolic",
-    "eduvpn-shield-busy-symbolic",
-    "eduvpn-shield-off-symbolic",
-    "eduvpn-institute-symbolic",
-    "eduvpn-globe-symbolic",
-    "eduvpn-server-symbolic",
+    "io.github.avanatiker.campusvpn",
+    "campusvpn-shield-on-symbolic",
+    "campusvpn-shield-busy-symbolic",
+    "campusvpn-shield-off-symbolic",
+    "campusvpn-institute-symbolic",
+    "campusvpn-globe-symbolic",
+    "campusvpn-server-symbolic",
 ];
 
 /// Makes the bundled icons available regardless of the system icon theme.
 fn install_icons(display: &gdk::Display) {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
-        });
-    let dir = base.join("eduvpn-rs").join("icons");
+    let dir = settings::cache_home().join("campusvpn").join("icons");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::warn!("creating icon cache: {e}");
         return;
@@ -174,7 +169,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
 
     // ---- Home page ----
     let badge_icon = gtk::Image::builder()
-        .icon_name("eduvpn-shield-off-symbolic")
+        .icon_name("campusvpn-shield-off-symbolic")
         .pixel_size(52)
         .build();
     let badge = gtk::Box::builder()
@@ -255,8 +250,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         .css_classes(["pill", "suggested-action", "main-button"])
         .build();
     let empty = adw::StatusPage::builder()
-        .icon_name("io.github.avanatiker.eduvpn-rs")
-        .title("Welcome to eduVPN")
+        .icon_name("io.github.avanatiker.campusvpn")
+        .title("Welcome to CampusVPN")
         .description(
             "Find your institution or enter the address of your VPN server to get started.",
         )
@@ -277,7 +272,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let menu = gio::Menu::new();
     menu.append(Some("Renew Session"), Some("app.renew"));
     menu.append(Some("Settings"), Some("app.settings"));
-    menu.append(Some("About eduVPN"), Some("app.about"));
+    menu.append(Some("About CampusVPN"), Some("app.about"));
     menu.append(Some("Quit"), Some("app.quit"));
     let header = adw::HeaderBar::new();
     header.pack_end(
@@ -291,7 +286,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     home_view.add_top_bar(&header);
     home_view.set_content(Some(&home_stack));
     let home_page = adw::NavigationPage::builder()
-        .title("eduVPN")
+        .title("CampusVPN")
         .tag("home")
         .child(&home_view)
         .build();
@@ -303,7 +298,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("eduVPN")
+        .title("CampusVPN")
         .default_width(440)
         .default_height(700)
         .width_request(360)
@@ -495,7 +490,7 @@ impl Ui {
                     .build(),
             );
         } else {
-            let n = gio::Notification::new("eduVPN");
+            let n = gio::Notification::new("CampusVPN");
             n.set_body(Some(msg));
             self.app.send_notification(Some("status"), &n);
         }
@@ -516,7 +511,7 @@ impl Ui {
         match ev {
             Ev::Fatal(msg) => {
                 self.show();
-                let d = adw::AlertDialog::new(Some("eduVPN could not start"), Some(&msg));
+                let d = adw::AlertDialog::new(Some("CampusVPN could not start"), Some(&msg));
                 d.add_response("quit", "Quit");
                 let app = self.app.clone();
                 d.connect_response(None, move |_, _| app.quit());
@@ -580,24 +575,24 @@ impl Ui {
                 self.badge.add_css_class("connected");
                 b.set_label("Disconnect");
                 b.add_css_class("destructive-action");
-                ("Connected", "eduvpn-shield-on-symbolic")
+                ("Connected", "campusvpn-shield-on-symbolic")
             }
             Phase::Connecting => {
                 self.badge.add_css_class("connecting");
                 b.set_label("Cancel");
-                ("Connecting…", "eduvpn-shield-busy-symbolic")
+                ("Connecting…", "campusvpn-shield-busy-symbolic")
             }
             Phase::Disconnecting => {
                 self.badge.add_css_class("connecting");
                 b.set_label("Disconnecting…");
                 b.set_sensitive(false);
-                ("Disconnecting…", "eduvpn-shield-busy-symbolic")
+                ("Disconnecting…", "campusvpn-shield-busy-symbolic")
             }
             Phase::Disconnected => {
                 b.set_label("Connect");
                 b.add_css_class("suggested-action");
                 b.set_sensitive(has_servers);
-                ("Not connected", "eduvpn-shield-off-symbolic")
+                ("Not connected", "campusvpn-shield-off-symbolic")
             }
         };
         self.title.set_label(title);
@@ -658,9 +653,9 @@ impl Ui {
                 .activatable(true)
                 .build();
             let icon = match s.kind {
-                ServerType::SecureInternet => "eduvpn-globe-symbolic",
-                ServerType::InstituteAccess => "eduvpn-institute-symbolic",
-                _ => "eduvpn-server-symbolic",
+                ServerType::SecureInternet => "campusvpn-globe-symbolic",
+                ServerType::InstituteAccess => "campusvpn-institute-symbolic",
+                _ => "campusvpn-server-symbolic",
             };
             row.add_prefix(&gtk::Image::from_icon_name(icon));
             if current.as_ref() == Some(&(s.kind, s.id.clone())) {
@@ -850,7 +845,7 @@ impl Ui {
         let d = adw::AlertDialog::new(
             Some("Log in with your browser"),
             Some(
-                "A browser window was opened. Log in there and authorise eduVPN; this dialog closes by itself.",
+                "A browser window was opened. Log in there and approve the access request; this dialog closes by itself.",
             ),
         );
         d.add_responses(&[("cancel", "Cancel"), ("copy", "Copy Link")]);
@@ -1080,7 +1075,7 @@ impl Ui {
         let startup = adw::PreferencesGroup::builder().title("Startup").build();
         let autostart = adw::SwitchRow::builder()
             .title("Start on login")
-            .subtitle("Launch eduVPN in the background when you log in")
+            .subtitle("Launch CampusVPN in the background when you log in")
             .active(settings::autostart_enabled())
             .build();
         let window = self.window.clone();
@@ -1109,7 +1104,7 @@ impl Ui {
 
         let window_group = adw::PreferencesGroup::builder().title("Window").build();
         let tray_sub = if has_tray {
-            "Closing the window keeps eduVPN running in the system tray"
+            "Closing the window keeps CampusVPN running in the system tray"
         } else {
             "No system tray found on this desktop"
         };
@@ -1173,11 +1168,11 @@ impl Ui {
 
     fn open_about(&self) {
         let about = adw::AboutDialog::builder()
-            .application_name("eduVPN")
+            .application_name("CampusVPN")
             .application_icon(settings::APP_ID)
             .version(env!("CARGO_PKG_VERSION"))
-            .comments("A lightweight eduVPN client for Linux, written in Rust.\nUses the official eduvpn-common library.")
-            .website("https://www.eduvpn.org/")
+            .comments("A lightweight Linux VPN client for eduVPN and Let's Connect! servers, written in Rust.\nNot affiliated with eduVPN, GÉANT or SURF. Uses the eduvpn-common library.")
+            .website("https://github.com/Avanatiker/campusvpn")
             .license_type(gtk::License::Gpl30)
             .build();
         about.present(Some(&self.window));

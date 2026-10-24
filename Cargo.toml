@@ -1,12 +1,12 @@
 [package]
-name = "eduvpn-rs"
-version = "0.1.0"
+name = "campusvpn"
+version = "0.2.0"
 edition = "2024"
-description = "Unofficial lightweight eduVPN client for Linux with system tray and auto-connect"
+description = "Lightweight Linux VPN client with system tray and auto-connect, compatible with eduVPN and Let's Connect! servers"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/Avanatiker/eduvpn-rs"
+repository = "https://github.com/Avanatiker/campusvpn"
 readme = "README.md"
-keywords = ["eduvpn", "vpn", "wireguard", "gtk4", "tray"]
+keywords = ["vpn", "wireguard", "openvpn", "gtk4", "tray"]
 categories = ["network-programming", "gui"]
 rust-version = "1.92"
 

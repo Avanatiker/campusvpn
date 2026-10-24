@@ -13,7 +13,7 @@ mod types;
 mod ui;
 
 const USAGE: &str = "\
-Usage: eduvpn-rs [OPTIONS]
+Usage: campusvpn [OPTIONS]
 
 Options:
   --hidden      Start in the system tray without showing the window
@@ -28,6 +28,8 @@ Environment:
 fn main() -> gtk::glib::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    settings::migrate_legacy();
+
     let mut hidden = false;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
@@ -38,7 +40,7 @@ fn main() -> gtk::glib::ExitCode {
                 return gtk::glib::ExitCode::SUCCESS;
             }
             "-V" | "--version" => {
-                println!("eduvpn-rs {}", env!("CARGO_PKG_VERSION"));
+                println!("campusvpn {}", env!("CARGO_PKG_VERSION"));
                 return gtk::glib::ExitCode::SUCCESS;
             }
             other => {

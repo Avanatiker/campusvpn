@@ -1,14 +1,18 @@
 //! Application settings and login autostart.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::ServerType;
 
-pub const APP_ID: &str = "io.github.avanatiker.eduvpn-rs";
+pub const APP_ID: &str = "io.github.avanatiker.campusvpn";
+const NAME: &str = "campusvpn";
+// The project was called eduvpn-rs up to version 0.1.
+const LEGACY_NAME: &str = "eduvpn-rs";
+const LEGACY_APP_ID: &str = "io.github.avanatiker.eduvpn-rs";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LastServer {
@@ -57,13 +61,22 @@ fn config_home() -> PathBuf {
         })
 }
 
+pub fn cache_home() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
+        })
+}
+
 /// Directory used by eduvpn-common. Shared with the official client so servers carry over.
 pub fn common_dir() -> PathBuf {
     config_home().join("eduvpn")
 }
 
 fn settings_path() -> PathBuf {
-    config_home().join("eduvpn-rs").join("settings.json")
+    config_home().join(NAME).join("settings.json")
 }
 
 impl Settings {
@@ -127,16 +140,55 @@ pub fn set_autostart(enabled: bool) -> std::io::Result<()> {
             _ => Ok(()),
         };
     }
+    write_autostart(&path)
+}
+
+fn write_autostart(path: &Path) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(
-        &path,
+        path,
         format!(
-            "[Desktop Entry]\nType=Application\nName=eduvpn-rs\nComment=Connect to eduVPN\n\
+            "[Desktop Entry]\nType=Application\nName=CampusVPN\nComment=Connect to your VPN server\n\
              Exec=\"{}\" --autostart\nIcon={APP_ID}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
             exe.display()
         ),
     )
+}
+
+/// Moves the settings and autostart entry of versions released as "eduvpn-rs".
+pub fn migrate_legacy() {
+    migrate_legacy_in(&config_home(), &cache_home());
+}
+
+fn migrate_legacy_in(config: &Path, cache: &Path) {
+    let old_dir = config.join(LEGACY_NAME);
+    let old_settings = old_dir.join("settings.json");
+    let new_settings = config.join(NAME).join("settings.json");
+    if old_settings.exists() && !new_settings.exists() {
+        let moved = std::fs::create_dir_all(new_settings.parent().unwrap())
+            .and_then(|_| std::fs::rename(&old_settings, &new_settings));
+        match moved {
+            Ok(()) => log::info!("moved settings to {}", new_settings.display()),
+            Err(e) => log::warn!("moving {}: {e}", old_settings.display()),
+        }
+    }
+    // Only removed once empty.
+    let _ = std::fs::remove_dir(&old_dir);
+
+    let autostart = config.join("autostart");
+    let old_autostart = autostart.join(format!("{LEGACY_APP_ID}.desktop"));
+    if old_autostart.exists() {
+        match write_autostart(&autostart.join(format!("{APP_ID}.desktop"))) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&old_autostart);
+            }
+            Err(e) => log::warn!("moving autostart entry: {e}"),
+        }
+    }
+
+    // Only held the bundled icons.
+    let _ = std::fs::remove_dir_all(cache.join(LEGACY_NAME));
 }
 
 #[cfg(test)]
@@ -161,5 +213,31 @@ mod tests {
         assert!(!s.autoconnect);
         assert!(s.close_to_tray);
         assert!(s.udp_blocked.is_empty());
+    }
+
+    #[test]
+    fn migrates_legacy_files() {
+        let tmp = std::env::temp_dir().join(format!("campusvpn-test-{}", uuid::Uuid::new_v4()));
+        let (config, cache) = (tmp.join("config"), tmp.join("cache"));
+        std::fs::create_dir_all(config.join(LEGACY_NAME)).unwrap();
+        std::fs::write(config.join(LEGACY_NAME).join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(config.join("autostart")).unwrap();
+        let old_autostart = config
+            .join("autostart")
+            .join(format!("{LEGACY_APP_ID}.desktop"));
+        std::fs::write(&old_autostart, "").unwrap();
+        std::fs::create_dir_all(cache.join(LEGACY_NAME).join("icons")).unwrap();
+
+        migrate_legacy_in(&config, &cache);
+
+        assert!(config.join(NAME).join("settings.json").exists());
+        assert!(!config.join(LEGACY_NAME).exists());
+        assert!(!old_autostart.exists());
+        let entry =
+            std::fs::read_to_string(config.join("autostart").join(format!("{APP_ID}.desktop")))
+                .unwrap();
+        assert!(entry.contains("--autostart"));
+        assert!(!cache.join(LEGACY_NAME).exists());
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

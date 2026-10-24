@@ -16,8 +16,8 @@ const NM_PATH: &str = "/org/freedesktop/NetworkManager";
 const SETTINGS_PATH: &str = "/org/freedesktop/NetworkManager/Settings";
 const ACTIVE_IFACE: &str = "org.freedesktop.NetworkManager.Connection.Active";
 
-pub const IFACE_NAME: &str = "eduVPN";
-const CONNECTION_ID: &str = "eduVPN";
+pub const IFACE_NAME: &str = "CampusVPN";
+const CONNECTION_ID: &str = "CampusVPN";
 const DEFAULT_FWMARK: u32 = 51860;
 const TABLE_MAIN: u32 = 254;
 
@@ -264,8 +264,8 @@ impl Nm {
             .context("WireGuard config has no [Interface]")?;
         let peer = ini.get("Peer").context("WireGuard config has no [Peer]")?;
 
-        let fwmark: u32 = env_num("EDUVPN_WG_FWMARK").unwrap_or(DEFAULT_FWMARK);
-        let mut listen_port: u16 = env_num("EDUVPN_WG_LISTEN_PORT").unwrap_or(0);
+        let fwmark: u32 = env_num("CAMPUSVPN_WG_FWMARK").unwrap_or(DEFAULT_FWMARK);
+        let mut listen_port: u16 = env_num("CAMPUSVPN_WG_LISTEN_PORT").unwrap_or(0);
         if let Some(p) = proxy
             && listen_port == 0
         {
@@ -499,7 +499,7 @@ impl Nm {
         default_gateway: bool,
         dns_search: &[String],
     ) -> Result<String> {
-        let dir = std::env::temp_dir().join(format!("eduvpn-rs-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("campusvpn-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir)?;
         let file = dir.join(format!("{CONNECTION_ID}.ovpn"));
         crate::keyring::write_private(&file, config)?;

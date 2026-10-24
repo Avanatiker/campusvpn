@@ -1,12 +1,12 @@
 # Maintainer: Constructor <fractalminds@protonmail.com>
 
-pkgname=eduvpn-rs
-pkgver=0.1.0
+pkgname=campusvpn
+pkgver=0.2.0
 pkgrel=1
 _commonver=5.0.3
-pkgdesc='Unofficial lightweight eduVPN client with system tray and auto-connect'
+pkgdesc="Lightweight VPN client with tray and auto-connect, compatible with eduVPN and Let's Connect! servers"
 arch=('x86_64' 'aarch64')
-url='https://github.com/Avanatiker/eduvpn-rs'
+url='https://github.com/Avanatiker/campusvpn'
 license=('GPL-3.0-or-later' 'MIT')
 depends=('gtk4' 'libadwaita' 'networkmanager' 'glib2' 'glibc' 'gcc-libs' 'hicolor-icon-theme')
 makedepends=('cargo' 'go')
@@ -45,11 +45,11 @@ check() {
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 target/release/eduvpn-rs "$pkgdir/usr/bin/eduvpn-rs"
-  install -Dm644 data/io.github.avanatiker.eduvpn-rs.desktop -t "$pkgdir/usr/share/applications/"
-  install -Dm644 data/icons/io.github.avanatiker.eduvpn-rs.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  install -Dm755 target/release/campusvpn "$pkgdir/usr/bin/campusvpn"
+  install -Dm644 data/io.github.avanatiker.campusvpn.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 data/icons/io.github.avanatiker.campusvpn.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
   install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
 
-  install -Dm755 "$srcdir/eduvpn-common-$_commonver/lib/libeduvpn_common-$_commonver.so" -t "$pkgdir/usr/lib/eduvpn-rs/"
+  install -Dm755 "$srcdir/eduvpn-common-$_commonver/lib/libeduvpn_common-$_commonver.so" -t "$pkgdir/usr/lib/campusvpn/"
   install -Dm644 "$srcdir/eduvpn-common-$_commonver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-eduvpn-common"
 }

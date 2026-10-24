@@ -31,21 +31,21 @@ jobs:
           tar xf "eduvpn-common-$COMMON_VERSION.tar.xz"
           GOFLAGS="-trimpath -tags=release" make -C "eduvpn-common-$COMMON_VERSION"
 
-      - name: Build eduvpn-rs
+      - name: Build campusvpn
         run: cargo build --release --locked
 
       - name: Package
         run: |
-          name="eduvpn-rs-${GITHUB_REF_NAME#v}-x86_64-linux"
+          name="campusvpn-${GITHUB_REF_NAME#v}-x86_64-linux"
           mkdir "$name"
-          cp target/release/eduvpn-rs "$name/"
+          cp target/release/campusvpn "$name/"
           cp "eduvpn-common-$COMMON_VERSION/lib/libeduvpn_common-$COMMON_VERSION.so" "$name/"
           cp "eduvpn-common-$COMMON_VERSION/LICENSE" "$name/LICENSE-eduvpn-common"
-          cp data/io.github.avanatiker.eduvpn-rs.desktop data/icons/io.github.avanatiker.eduvpn-rs.svg LICENSE README.md "$name/"
+          cp data/io.github.avanatiker.campusvpn.desktop data/icons/io.github.avanatiker.campusvpn.svg LICENSE README.md "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" eduvpn-rs-*.tar.gz eduvpn-rs-*.tar.gz.sha256 --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" campusvpn-*.tar.gz campusvpn-*.tar.gz.sha256 --generate-notes

@@ -471,7 +471,7 @@ impl Backend {
             let s = self.settings.lock().unwrap();
             s.prefer_tcp
                 || udp_key.as_ref().is_some_and(|k| s.is_udp_blocked(k))
-                || std::env::var("EDUVPN_PREFER_TCP").is_ok_and(|v| v == "1")
+                || std::env::var("CAMPUSVPN_PREFER_TCP").is_ok_and(|v| v == "1")
         };
         if prefer_tcp {
             log::info!("using TCP for this server and network");

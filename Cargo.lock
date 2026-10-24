@@ -294,6 +294,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "campusvpn"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "env_logger",
+ "glib-unix",
+ "gtk4",
+ "ipnet",
+ "ksni",
+ "libadwaita",
+ "libloading",
+ "log",
+ "secret-service",
+ "serde",
+ "serde_json",
+ "uuid",
+ "zbus",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -435,27 +456,6 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "ctutils",
-]
-
-[[package]]
-name = "eduvpn-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "env_logger",
- "glib-unix",
- "gtk4",
- "ipnet",
- "ksni",
- "libadwaita",
- "libloading",
- "log",
- "secret-service",
- "serde",
- "serde_json",
- "uuid",
- "zbus",
 ]
 
 [[package]]

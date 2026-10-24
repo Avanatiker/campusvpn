@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::types::{ServerType, Tokens};
 
+// Shared with the official client: items are looked up by these attributes.
 const SCHEMA: &str = "eduVPN";
 
 pub struct Keyring {
@@ -111,7 +112,7 @@ impl Keyring {
             .get_default_collection()
             .or_else(|_| ss.get_any_collection())?;
         collection.ensure_unlocked()?;
-        let label = format!("eduVPN - {server_id} - OAuth Tokens");
+        let label = format!("CampusVPN - {server_id} - OAuth Tokens");
         collection
             .create_item(
                 &label,
